@@ -1,6 +1,6 @@
-# Runs the Telegram bot24/7 on GitHub's own runners - completely free,
-# no credit card, no server. GitHub caps a single job at6 hours, so the
-# workflow is scheduled every6 hours: when one run hits the cap the next
+# Runs the Telegram bot 24/7 on GitHub's own runners - completely free,
+# no credit card, no server. GitHub caps a single job at 6 hours, so the
+# workflow is scheduled every 6 hours: when one run hits the cap the next
 # one starts right away (the bot is back within a minute or two).
 #
 # Setup (once):
@@ -13,7 +13,7 @@ name: Run bot
 
 on:
   schedule:
-    - cron: '0 */6 * * *' #00:00 /06:00 /12:00 /18:00 UTC
+    - cron: '0 */6 * * *' # 00:00 / 06:00 / 12:00 / 18:00 UTC
   workflow_dispatch: {} # manual start button
 
 # Never two bots at once (a manual run while a scheduled one is live).
@@ -27,7 +27,7 @@ permissions:
 jobs:
   bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 360 # GitHub's hard limit:6 hours per job
+    timeout-minutes: 360 # GitHub's hard limit: 6 hours per job
     steps:
       - uses: actions/checkout@v4
 
@@ -47,9 +47,20 @@ jobs:
           BROWSER_PAGES: '3'
           CHECK_PARALLEL: '3'
           BLOCK_RESOURCES: '2'
-        run: node src/index.js
+        run: |
+          # Keep the bot alive for the whole 6h window:
+          #   - a crash (e.g. one stray 409 conflict) restarts after 5s
+          #   - every instance is recycled after 4h50m so a silently stuck
+          #     process can never waste the rest of the window
+          set +e
+          while true; do
+            timeout -s TERM 17400 node src/index.js
+            code=$?
+            echo "bot process ended (exit $code) - restarting in 5s"
+            sleep 5
+          done
 
-      # GitHub disables scheduled workflows in repos with no activity for60
+      # GitHub disables scheduled workflows in repos with no activity for 60
       # days - this tiny commit counts as activity and shows the last run.
       - name: Keep the repo alive
         if: always()
@@ -59,4 +70,6 @@ jobs:
           date -u +"last run: %Y-%m-%d %H:%M:%S UTC" > last-run.txt
           git add last-run.txt
           git diff --cached --quiet || git commit -m "chore: keep scheduled workflow active"
-          git push
+          # The remote may have moved (someone pushed while we ran) - rebase first.
+          git pull --rebase origin main || true
+          git push || { git pull --rebase origin main && git push; }
