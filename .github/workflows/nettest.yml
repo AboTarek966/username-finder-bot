@@ -1,0 +1,21 @@
+name: nettest
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Telegram reachability
+        env:
+          T: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          echo "== proxy vars =="
+          env | grep -i proxy || echo "(none)"
+          echo "== generic https =="
+          curl -sS -m 20 -o /dev/null -w "api.telegram.org/ -> HTTP %{http_code} in %{time_total}s\n" https://api.telegram.org/ || echo "curl exit $?"
+          echo "== getMe =="
+          curl -sS -m 20 "https://api.telegram.org/bot${T}/getMe" | head -c 300
+          echo
+          echo "== github api =="
+          curl -sS -m 20 -o /dev/null -w "api.github.com -> HTTP %{http_code}\n" https://api.github.com/
