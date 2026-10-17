@@ -277,7 +277,11 @@ async function detectInstagram(page, name, budgetMs = 16_000) {
     .catch(() => {});
 
   // Instagram shows a "not available" style page to throttled visitors too,
-  // so EVERY free verdict has to survive the control-profile check.
+  // so EVERY free verdict has to survive the control-profile check (a known
+  // taken profile must still render as taken, or our whole view is junk).
+  // Note: Instagram answers with HTTP 200 in most regions, so the hard proof
+  // here is the rendered "Profile isn't available" text + sane control, both
+  // of which must then be reproduced by the second confirmation pass.
   const maybeFree = async () =>
     (await controlHealthy(page, 'instagram', name)) ? FREE : UNKNOWN;
 
@@ -368,21 +372,10 @@ async function httpGet(url, options = {}, timeout = 15_000) {
   }
 }
 
-/** Instagram probe of a control handle: proves our IP still sees real data. */
-let control = { ok: false, at: 0 };
-async function igControlOk() {
-  if (Date.now() - control.at < 5 * 60_000) return control.ok;
-  try {
-    const { res, text } = await httpGet('https://www.instagram.com/instagram/');
-    const ok = res.status === 200 && /property="og:description"|profilePage_/i.test(text);
-    control = { ok, at: Date.now() };
-    return ok;
-  } catch {
-    control = { ok: false, at: Date.now() };
-    return false;
-  }
-}
-
+/* Instagram: only a real HTTP 404 may ever mean "free". A 200 page without
+   profile markers is NOT evidence - that is exactly the answer a throttled
+   or JS-shelled visitor gets for an account that exists (it once produced a
+   confident wrong ✅). Missing evidence can only ever mean UNKNOWN. */
 async function viaHttpInstagram(name) {
   try {
     const { res, text } = await httpGet(`https://www.instagram.com/${encodeURIComponent(name)}/`, {
@@ -395,10 +388,7 @@ async function viaHttpInstagram(name) {
       },
     });
     if (res.status === 404) return FREE;
-    if (res.status === 200) {
-      if (/property="og:description"|profilePage_/i.test(text)) return TAKEN;
-      if (await igControlOk()) return FREE; // our IP is fine and markers are absent
-    }
+    if (res.status === 200 && /property="og:description"|profilePage_/i.test(text)) return TAKEN;
   } catch {
     /* fall through */
   }
@@ -463,7 +453,10 @@ const HTTP = { tiktok: viaHttpTikTok, instagram: viaHttpInstagram };
 /**
  * @param {string} username
  * @param {'tiktok'|'instagram'} platform
- * @param {{fresh?: boolean}} [opts] fresh:true ignores the cache (double-checking)
+ * @param {{fresh?: boolean, confirm?: boolean}} [opts]
+ *   fresh:true   ignores the cache (double-checking)
+ *   confirm:false skips the mandatory second pass (only for callers that
+ *                already run their own delayed re-check, e.g. deep hunt)
  * @returns {Promise<'free'|'taken'|'unknown'>}
  */
 export async function checkUsername(username, platform, opts = {}) {
@@ -503,10 +496,29 @@ export async function checkUsername(username, platform, opts = {}) {
     if (cross === TAKEN) status = TAKEN;
   }
 
+  /* ---------------------------------------------------------------- *
+   * The ONLY verdict that can hurt the user is "free" - a wrong one    *
+   * hands them a name that is already registered. So "free" must be    *
+   * reproduced on a brand-new page before we ever say it out loud;     *
+   * anything that cannot be reproduced is downgraded and never shown   *
+   * as available. "taken"/"unknown" cost nothing when they are wrong,  *
+   * so they are never re-run (keeps the fast paths fast).              *
+   * ---------------------------------------------------------------- */
+  if (status === FREE && opts.confirm !== false && !opts.confirming) {
+    await new Promise((r) => setTimeout(r, 1200));
+    const again = await checkUsername(name, platform, {
+      fresh: true,
+      confirming: true,
+    });
+    if (again !== FREE) status = again === TAKEN ? TAKEN : UNKNOWN;
+  }
+
   noteOutcome(platform, status);
 
-  // Never pin an "unknown" for hours - it only means "try again later".
-  const ttl = status === UNKNOWN ? 60_000 : CACHE_TTL;
+  // Cache lifetimes: "unknown" means "retry later" (short), "taken" is
+  // stable (long) - but a free name can be registered by someone else at
+  // any moment, so never serve a stale "free" answer.
+  const ttl = status === UNKNOWN ? 60_000 : status === FREE ? 15 * 60_000 : CACHE_TTL;
   cache.set(key, { status, at: Date.now(), ttl });
   return status;
 }
@@ -545,8 +557,8 @@ export function emoji(status) {
 
 export function statusText(status) {
   return status === FREE
-    ? 'غير محجوز'
+    ? 'غير محجوز (مؤكد مرتين)'
     : status === TAKEN
       ? 'محجوز'
-      : 'غير متأكد (حظر/حد مؤقت)';
+      : 'مش مؤكد — مستبعد من النتايج';
 }

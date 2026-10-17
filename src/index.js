@@ -17,6 +17,8 @@ import {
   RULES,
   ALL_PLATFORMS,
   FREE,
+  TAKEN,
+  UNKNOWN,
   mapPool,
 } from './checker.js';
 import {
@@ -180,7 +182,7 @@ async function runCheck(ctx, names) {
 
   const freeCount = rows.filter((r) => r.startsWith('🎯')).length;
   const footer = freeCount
-    ? `\n\n🎯 يوزرات متاحة: ${freeCount}`
+    ? `\n\n🎯 يوزرات متاحة (مؤكدة بفحصين): ${freeCount}`
     : '\n\nمفيش يوزرات متاحة في القائمة دي.';
   await ctx.api
     .editMessageText(ctx.chat.id, msg.message_id, rows.join('\n\n') + footer, {
@@ -205,19 +207,30 @@ async function runGen(ctx, mode, count) {
   const rows = await mapPool(candidates, PARALLEL, async (name, i) => {
     const res = await checkOn(name, platforms);
     await update(i + 1, candidates.length, 'بيفحص');
-    const parts = platforms.map(
-      (p) => `  ${RULES[p].label}: ${emoji(res[p])} ${statusText(res[p])}`
-    );
-    const free = platforms.some((p) => res[p] === FREE);
-    return { name, free, text: `${free ? '🎯 ' : ''}<b>@${name}</b>\n${parts.join('\n')}` };
+    const status = platforms.map((p) => res[p]);
+    return {
+      name,
+      free: status.includes(FREE),
+      taken: status.every((s) => s === TAKEN),
+    };
   });
 
+  // Only names that survived the double verification are ever listed by
+  // name; everything else is reduced to counts so a shaky answer can never
+  // look like a result.
   const freeOnes = rows.filter((r) => r.free).map((r) => `  • @${r.name}`);
-  const footer = freeOnes.length
-    ? `\n\n🎯 <b>المتاحة دلوقتي (سجّل بسرعة):</b>\n${freeOnes.join('\n')}`
-    : '\n\nمفيش حاجة متاحة دلوقتي — جرّب نوع توليد تاني أو كرّر بعد شوية.';
+  const takenCount = rows.filter((r) => !r.free && r.taken).length;
+  const unknownCount = rows.filter((r) => !r.free && !r.taken).length;
+  const stats =
+    `\n\n📊 من <b>${rows.length}</b> يوزر:` +
+    ` <b>${freeOnes.length}</b> متاحة ✅` +
+    ` — ${takenCount} محجوز ❌` +
+    (unknownCount ? ` — ${unknownCount} مش مؤكد (مخفى عمدًا) ⚠️` : '');
+  const body = freeOnes.length
+    ? `🎯 <b>المتاحة فعلاً (مؤكدة بفحصين):</b>\n${freeOnes.join('\n')}`
+    : '\nمفيش اسم متاح مؤكد في الدفعة دي — كرّر أو جرّب نوع توليد تاني.';
   await ctx.api
-    .editMessageText(ctx.chat.id, msg.message_id, rows.map((r) => r.text).join('\n\n') + footer, {
+    .editMessageText(ctx.chat.id, msg.message_id, body + stats, {
       parse_mode: 'HTML',
       reply_markup: againKeyboard(mode),
     })
@@ -241,15 +254,25 @@ async function runScan(ctx, base, limit) {
   const rows = await mapPool(list, PARALLEL, async (name, i) => {
     const status = await checkUsername(name, platform);
     await update(i + 1, list.length, 'بيجرب');
-    return { name, status, text: `${emoji(status)} <code>@${name}</code> — ${statusText(status)}` };
+    return { name, status };
   });
 
-  const freeOnes = rows.filter((r) => r.status === FREE).map((r) => `  • @${r.name}`);
-  const footer = freeOnes.length
-    ? `\n\n🎯 <b>المتاحة:</b>\n${freeOnes.join('\n')}`
-    : '\n\nمفيش صيغة متاحة للاسم ده.';
+  // Same rule as generation: name only what survived the double check.
+  const freeOnes = rows
+    .filter((r) => r.status === FREE)
+    .map((r) => `  • <code>@${r.name}</code>`);
+  const takenCount = rows.filter((r) => r.status === TAKEN).length;
+  const unknownCount = rows.filter((r) => r.status === UNKNOWN).length;
+  const stats =
+    `\n\n📊 من <b>${rows.length}</b> صيغة:` +
+    ` <b>${freeOnes.length}</b> متاحة ✅` +
+    ` — ${takenCount} محجوزة ❌` +
+    (unknownCount ? ` — ${unknownCount} مش مؤكدة (مخفية عمدًا) ⚠️` : '');
+  const body = freeOnes.length
+    ? `🎯 <b>المتاحة فعلاً (مؤكدة بفحصين):</b>\n${freeOnes.join('\n')}`
+    : '\nمفيش صيغة متاحة متأكدة منها للاسم ده — جرّب كلمة تانية.';
   await ctx.api
-    .editMessageText(ctx.chat.id, msg.message_id, rows.map((r) => r.text).join('\n') + footer, {
+    .editMessageText(ctx.chat.id, msg.message_id, body + stats, {
       parse_mode: 'HTML',
     })
     .catch(() => {});

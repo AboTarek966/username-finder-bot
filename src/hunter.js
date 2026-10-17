@@ -82,9 +82,11 @@ export async function deepHunt(opts) {
         continue;
       }
 
-      // --- confirmation pass: fresh page, cache bypassed ---
+      // --- confirmation pass: fresh page, cache bypassed, delayed ---
+      // The checker already verified this "free" answer twice by itself;
+      // this pass adds a time gap, so it skips its own internal re-verify.
       await new Promise((r) => setTimeout(r, CONFIRM_DELAY));
-      const again = await checkOn(name, platforms, { fresh: true });
+      const again = await checkOn(name, platforms, { fresh: true, confirm: false });
       const confirmed = platforms.filter((p) => again[p] === FREE);
 
       if (confirmed.length) free.push({ name, platforms: confirmed });
