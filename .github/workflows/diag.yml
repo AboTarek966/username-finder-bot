@@ -1,0 +1,50 @@
+name: diag
+on:
+  workflow_dispatch:
+jobs:
+  d:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm install --omit=dev
+
+      - name: bot for 75s
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          BROWSER_PATH: /usr/bin/google-chrome
+          BROWSER_PAGES: '3'
+          CHECK_PARALLEL: '3'
+          BLOCK_RESOURCES: '2'
+        run: |
+          set +e
+          timeout -s TERM 75 node src/index.js 2>&1 | tee bot-out.txt
+          echo "node pipeline exit=$?"
+
+      - name: node fetch long-poll test
+        env:
+          T: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          timeout 45 node -e "
+          const t = process.env.T, s = Date.now();
+          const ctrl = new AbortController();
+          setTimeout(() => ctrl.abort(), 40000);
+          fetch('https://api.telegram.org/bot' + t + '/getUpdates?timeout=30', { signal: ctrl.signal })
+            .then(r => r.text())
+            .then(x => console.log('NODE OK', Date.now() - s, 'ms ->', x.slice(0, 150)))
+            .catch(e => console.log('NODE ERR after', Date.now() - s, 'ms ->', e.message));
+          "
+          echo "step exit=$?"
+
+      - name: curl long-poll test
+        env:
+          T: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          S=$(date +%s)
+          timeout 45 curl -sS -m 40 "https://api.telegram.org/bot${T}/getUpdates?timeout=30" | head -c 200
+          echo
+          echo "curl took $(( $(date +%s) - S ))s"
