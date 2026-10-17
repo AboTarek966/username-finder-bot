@@ -1,0 +1,9 @@
+services:
+  bot:
+    build: .
+    container_name: username-finder
+    restart: unless-stopped        # auto-restart on crash AND on server reboot
+    env_file: .env                 # your TELEGRAM_BOT_TOKEN lives here
+    volumes:
+      # Live-editing: changes in src/ on the server restart the bot (pm2 watch).
+      - ./src:/app/src

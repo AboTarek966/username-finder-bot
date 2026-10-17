@@ -1,0 +1,62 @@
+# Runs the Telegram bot24/7 on GitHub's own runners - completely free,
+# no credit card, no server. GitHub caps a single job at6 hours, so the
+# workflow is scheduled every6 hours: when one run hits the cap the next
+# one starts right away (the bot is back within a minute or two).
+#
+# Setup (once):
+#   1. Push this project to a PUBLIC repo (public = unlimited free minutes).
+#   2. Repo -> Settings -> Secrets and variables -> Actions -> New secret
+#      Name: TELEGRAM_BOT_TOKEN   Value: the token from @BotFather
+#   3. Repo -> Actions -> enable workflows, then "Run workflow" to start now.
+
+name: Run bot
+
+on:
+  schedule:
+    - cron: '0 */6 * * *' #00:00 /06:00 /12:00 /18:00 UTC
+  workflow_dispatch: {} # manual start button
+
+# Never two bots at once (a manual run while a scheduled one is live).
+concurrency:
+  group: username-finder
+  cancel-in-progress: false
+
+permissions:
+  contents: write # needed for the keep-alive commit below
+
+jobs:
+  bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360 # GitHub's hard limit:6 hours per job
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install --omit=dev
+
+      - name: Run the bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          # Google Chrome is preinstalled on GitHub's Ubuntu runners.
+          BROWSER_PATH: /usr/bin/google-chrome
+          BROWSER_PAGES: '3'
+          CHECK_PARALLEL: '3'
+          BLOCK_RESOURCES: '2'
+        run: node src/index.js
+
+      # GitHub disables scheduled workflows in repos with no activity for60
+      # days - this tiny commit counts as activity and shows the last run.
+      - name: Keep the repo alive
+        if: always()
+        run: |
+          git config user.name "bot-updater"
+          git config user.email "bot@users.noreply.github.com"
+          date -u +"last run: %Y-%m-%d %H:%M:%S UTC" > last-run.txt
+          git add last-run.txt
+          git diff --cached --quiet || git commit -m "chore: keep scheduled workflow active"
+          git push

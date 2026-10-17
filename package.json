@@ -1,0 +1,23 @@
+{
+  "name": "username-finder-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot that finds available (unclaimed) TikTok and Instagram usernames",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "check": "node src/cli.js check",
+    "gen": "node src/cli.js gen",
+    "scan": "node src/cli.js scan",
+    "deep": "node src/cli.js deep"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "grammy": "^1.30.0",
+    "puppeteer-core": "^25.14.0"
+  }
+}
