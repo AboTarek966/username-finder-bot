@@ -537,6 +537,35 @@ async function controlAlive(platform) {
   return ok;
 }
 
+/* Instagram over plain HTTP: only a POSITIVE profile marker counts, and only
+   as "taken" (og:description / profilePage_ / the page's own username JSON).
+   Instagram answers a throttled visitor with a generic shell that looks
+   IDENTICAL to a missing profile, so "nothing found" can never mean free
+   here - the browser decides that (it hydrates to "Profile isn't available"
+   for handles that do not exist). */
+let igScreenNext = 0;
+async function screenIG(name) {
+  const now = Date.now();
+  const at = Math.max(now, igScreenNext);
+  igScreenNext = at + 1200; // Instagram throttles far harder than TikTok
+  if (at > now) await new Promise((r) => setTimeout(r, at - now));
+
+  try {
+    const { res, text } = await httpGet(
+      `https://www.instagram.com/${encodeURIComponent(name)}/`,
+      { headers: { Referer: 'https://www.instagram.com/' } },
+      8000
+    );
+    if (res.ok) {
+      if (/profilePage_/.test(text) || /property="og:description"/i.test(text)) return TAKEN;
+      if (new RegExp(`"username":"${escapeRe(name)}"`, 'i').test(text)) return TAKEN;
+    }
+  } catch {
+    /* throttled - the browser decides */
+  }
+  return UNKNOWN;
+}
+
 async function viaHttpTikTok(name) {
   try {
     const { res, text } = await httpGet(
@@ -633,8 +662,9 @@ export async function checkUsername(username, platform, opts = {}) {
   // calls "user not exist" is verified twice (fresh request) with the control
   // profile in the loop - so a FREE can be handed over in ~2s without ever
   // opening a browser. A disagreement between the two reads falls through to
-  // the browser, which decides as always.
-  if (!opts.fresh && !opts.confirming) {
+  // the browser, which decides as always. TikTok only - Instagram's HTML says
+  // nothing about a missing profile (a login wall looks identical to it).
+  if (platform === 'tiktok' && !opts.fresh && !opts.confirming) {
     const screened = await screenTikTok(name);
     if (screened === TAKEN) {
       noteOutcome(platform, TAKEN);
@@ -649,6 +679,18 @@ export async function checkUsername(username, platform, opts = {}) {
         cache.set(key, { status: FREE, at: Date.now(), ttl: 15 * 60_000 });
         return FREE;
       }
+    }
+  }
+
+  // Instagram: the only HTTP answer worth anything is the POSITIVE proof that
+  // a profile exists (og:description / profilePage_ / its own username JSON).
+  // That rejects taken candidates fast; everything else goes to the browser.
+  if (platform === 'instagram' && !opts.fresh && !opts.confirming) {
+    const screened = await screenIG(name);
+    if (screened === TAKEN) {
+      noteOutcome(platform, TAKEN);
+      cache.set(key, { status: TAKEN, at: Date.now(), ttl: CACHE_TTL });
+      return TAKEN;
     }
   }
 
