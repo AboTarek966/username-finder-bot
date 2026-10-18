@@ -1,6 +1,9 @@
 /* One-off diagnostic: what does TikTok answer FROM A GITHUB RUNNER?
-   Plain HTTP (desktop + mobile UA), then a real browser sample-by-sample.
+   1) plain HTTP (desktop + mobile UA) - this is what screenTaken uses
+   2) the REAL bot browser (src/browser.js -> system Chrome, same UA/headers)
    Used once to pick a verification path that survives datacenter IPs. */
+
+import { withPage, closeBrowser, findBrowser } from '../src/browser.js';
 
 const NAMES = ['nasa', 'zzzqqq123456xxplm9qqq', '8zzp0'];
 const UA =
@@ -8,16 +11,16 @@ const UA =
 const MOBILE_UA =
   'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
+console.log('browser binary:', findBrowser());
+
 function summarise(name, html, extra = {}) {
-  const notFound = /Couldn't find this account/i.test(html);
-  const uniqueIdHit = new RegExp(`"uniqueId":"${name}"`, 'i').test(html);
-  const shell = /Please wait/i.test(html) && html.length < 8000;
   return {
     name,
     bytes: html.length,
-    notFoundText: notFound,
-    uniqueIdHit,
-    shell,
+    notFoundText: /Couldn't find this account/i.test(html),
+    uniqueIdHit: new RegExp(`"uniqueId":"${name}"`, 'i').test(html),
+    controlHit: /"uniqueId":"nasa"/i.test(html),
+    shell: /Please wait/i.test(html) && html.length < 8000,
     ...extra,
   };
 }
@@ -28,73 +31,78 @@ for (const name of NAMES) {
     ['desktop', UA],
     ['mobile', MOBILE_UA],
   ]) {
-    for (const attempt of [1, 2]) {
-      try {
-        const res = await fetch(`https://www.tiktok.com/@${name}`, {
-          headers: {
-            'user-agent': ua,
-            accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'accept-language': 'en-US,en;q=0.9',
-          },
-        });
-        const html = await res.text();
-        console.log(
-          JSON.stringify({ label, attempt, http: res.status, ...summarise(name, html) })
-        );
-      } catch (err) {
-        console.log(`${name} ${label}#${attempt}: fetch error ${err.message}`);
-      }
-      await new Promise((r) => setTimeout(r, 800));
+    try {
+      const res = await fetch(`https://www.tiktok.com/@${name}`, {
+        headers: {
+          'user-agent': ua,
+          accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'accept-language': 'en-US,en;q=0.9',
+        },
+      });
+      const html = await res.text();
+      console.log(JSON.stringify({ label, http: res.status, ...summarise(name, html) }));
+    } catch (err) {
+      console.log(`${name} ${label}: fetch error ${err.message}`);
     }
+    await new Promise((r) => setTimeout(r, 800));
   }
 }
 
-console.log('== oembed ==');
+console.log('== mobile api ==');
 for (const name of NAMES) {
   try {
     const res = await fetch(
-      `https://www.tiktok.com/oembed?url=${encodeURIComponent(`https://www.tiktok.com/@${name}`)}`,
-      { headers: { 'user-agent': UA } }
+      `https://m.tiktok.com/api/user/detail?uniqueId=${name}&aid=1988`,
+      { headers: { 'user-agent': MOBILE_UA, accept: 'application/json' } }
     );
-    const text = (await res.text()).slice(0, 160);
-    console.log(`${name}: http=${res.status} body=${text}`);
+    const text = await res.text();
+    let sc = null;
+    let uid = '';
+    try {
+      const j = JSON.parse(text);
+      sc = j?.status_code;
+      uid = j?.user?.uniqueId ?? '';
+    } catch {}
+    console.log(`${name}: http=${res.status} bytes=${text.length} status_code=${sc} uniqueId="${uid}"`);
   } catch (err) {
-    console.log(`${name}: oembed error ${err.message}`);
+    console.log(`${name}: api error ${err.message}`);
   }
 }
 
-console.log('== browser ==');
-const { chromium } = await import('playwright');
-const browser = await chromium.launch({
-  headless: true,
-  args: ['--no-sandbox', '--disable-blink-features=AutomationControlled'],
-});
+console.log('== bot browser ==');
 for (const name of NAMES) {
-  const page = await browser.newPage({ userAgent: UA, locale: 'en-US' });
-  const t0 = Date.now();
-  try {
-    await page.goto(`https://www.tiktok.com/@${name}`, {
-      waitUntil: 'domcontentloaded',
-      timeout: 45_000,
-    });
-  } catch (err) {
-    console.log(`${name}: goto error ${err.message}`);
-  }
-  for (let i = 0; i < 30; i += 1) {
-    await new Promise((r) => setTimeout(r, 800));
-    let html = '';
-    let title = '';
+  const out = await withPage(async (page) => {
+    const t0 = Date.now();
+    let last = null;
     try {
-      html = await page.content();
-      title = await page.title();
-    } catch {
-      break;
+      await page.goto(`https://www.tiktok.com/@${name}`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 45_000,
+      });
+    } catch (err) {
+      console.log(`${name}: goto error ${err.message}`);
     }
-    const s = summarise(name, html, { title, t: Date.now() - t0, url: page.url() });
-    console.log(JSON.stringify(s));
-    if (s.notFoundText || s.uniqueIdHit) break;
-  }
-  await page.close().catch(() => {});
+    for (let i = 0; i < 26; i += 1) {
+      await new Promise((r) => setTimeout(r, 900));
+      let html = '';
+      let title = '';
+      try {
+        html = await page.content();
+        title = await page.title();
+      } catch {
+        break;
+      }
+      last = summarise(name, html, {
+        title,
+        t: Date.now() - t0,
+        url: page.url(),
+      });
+      console.log(JSON.stringify(last));
+      if (last.notFoundText || last.uniqueIdHit) break;
+    }
+    return last;
+  });
+  console.log(`${name}: browser final -> ${JSON.stringify(out)}`);
 }
-await browser.close();
+await closeBrowser();
 console.log('== done ==');
