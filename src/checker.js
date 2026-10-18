@@ -252,6 +252,12 @@ async function detectTikTok(page, name, budgetMs = 20_000) {
 
     const html = await safeContent(page);
     if (uniqueId.test(html)) return TAKEN;
+    // TikTok's own payload verdict (0 = user exists, 10221 = does not exist).
+    // On a GitHub runner the rendered text NEVER appears (hydration does not
+    // paint there) while this payload answers within a second - so it is what
+    // actually carries the check on a server, and a fast path locally too.
+    const verdict = ttVerdictFrom(html, name);
+    if (verdict === TAKEN) return TAKEN;
 
     // The document title is set much earlier than the rendered body text.
     // Guard with url + size checks so a stale title can't fool us.
@@ -277,12 +283,16 @@ async function detectTikTok(page, name, budgetMs = 20_000) {
     }
     // Same bar as the title path: we must still be on this profile page and
     // the page must have actually rendered (a half-loaded shell is not proof).
-    if (onProfile && html.length > 50_000 && TT_NOT_FOUND.test(text)) {
+    // Evidence is either the visible "Couldn't find this account" line OR the
+    // server payload saying "user not exist" - the latter is what a GitHub
+    // runner can actually see (its rendered text stays empty).
+    const freeEvidence = TT_NOT_FOUND.test(text) || verdict === FREE;
+    if (onProfile && html.length > 50_000 && freeEvidence) {
       freeStreak += 1;
       // Require the message to persist after the page had time to load,
       // so we never report "free" off a half-rendered shell.
       if (freeStreak >= 3 && Date.now() - started >= 3000) return maybeFree();
-    } else if (text.trim().length > 200) {
+    } else if (text.trim().length > 200 && verdict !== FREE) {
       // Real content that is NOT the not-found line contradicts "free" ->
       // reset. An EMPTY body does not contradict anything: TikTok re-renders
       // and the message flaps in and out, which used to turn a plainly free
@@ -469,6 +479,64 @@ async function viaSearchTikTok(name) {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* TikTok's own verdict, as served in the page payload                  */
+/* ------------------------------------------------------------------ */
+
+/* TikTok server-renders the answer into the HTML the app hydrates from:
+     <script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"> ... ["webapp.user-detail"]
+   - an EXISTING profile comes back with statusCode 0 plus its user object
+     (uniqueId included) -> proven taken;
+   - a handle that does NOT exist comes back with statusCode 10221
+     ("user not exist") and NO userInfo at all -> the free signal.
+   Anything else (missing blob, another code, a JS shell) is not a verdict
+   and must never be read as "free". Verified live from a GitHub runner:
+   the visible page text there stays EMPTY forever (hydration never paints),
+   while this payload answers correctly in ~0.3s. */
+const TT_NOT_EXIST = [10202, 10221, 10222]; // seen: 10221 = "user not exist"
+function ttVerdictFrom(html, name) {
+  const m = html.match(
+    /<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/
+  );
+  if (!m) return null;
+  let detail;
+  try {
+    detail = JSON.parse(m[1])?.['__DEFAULT_SCOPE__']?.['webapp.user-detail'];
+  } catch {
+    return null;
+  }
+  if (!detail || typeof detail.statusCode !== 'number') return null;
+  const user = detail.userInfo?.user;
+  if (detail.statusCode === 0 && user?.uniqueId) {
+    return user.uniqueId.toLowerCase() === String(name).toLowerCase() ? TAKEN : null;
+  }
+  if (!user && TT_NOT_EXIST.includes(detail.statusCode)) return FREE;
+  return null;
+}
+
+/* Is our view of TikTok healthy at all (plain HTTP flavour)? The control
+   profile is a known-taken handle: if TikTok stops showing it to us, its
+   "not found" answers cannot be trusted either - every FREE is withheld. */
+async function controlAlive(platform) {
+  if (platform !== 'tiktok') return false; // Instagram has no HTTP control
+  const state = controlState.tiktok;
+  if (Date.now() - state.at < 60_000) return state.ok;
+  let ok = false;
+  try {
+    const { res, text } = await httpGet(
+      `https://www.tiktok.com/@${CONTROL.tiktok}`,
+      { headers: { Referer: 'https://www.tiktok.com/' } },
+      8000
+    );
+    ok = Boolean(res.ok) && new RegExp(`"uniqueId":"${CONTROL.tiktok}"`, 'i').test(text);
+  } catch {
+    /* unhealthy for this minute */
+  }
+  state.ok = ok;
+  state.at = Date.now();
+  return ok;
+}
+
 async function viaHttpTikTok(name) {
   try {
     const { res, text } = await httpGet(
@@ -477,8 +545,13 @@ async function viaHttpTikTok(name) {
       8000
     );
     if (res.status === 404) return FREE;
-    if (res.status === 200 && new RegExp(`"uniqueId":"${escapeRe(name)}"`, 'i').test(text)) {
-      return TAKEN;
+    if (res.ok) {
+      if (new RegExp(`"uniqueId":"${escapeRe(name)}"`, 'i').test(text)) return TAKEN;
+      const v = ttVerdictFrom(text, name);
+      // "free" over plain HTTP still needs our control profile to be visible,
+      // otherwise we are looking at junk (WAF / edge node / shell page).
+      if (v === TAKEN) return TAKEN;
+      if (v === FREE && (await controlAlive('tiktok'))) return FREE;
     }
   } catch {
     /* WAF / network - try search */
@@ -494,13 +567,16 @@ const HTTP = { tiktok: viaHttpTikTok, instagram: viaHttpInstagram };
 
 /* Most candidates are already taken, and a plain HTTP response can PROVE
    that for TikTok (the profile payload embeds "uniqueId":"<name>") in about a
-   second - instead of a 15-second browser load. It only ever answers "taken":
-   it can never produce a wrong ✅, at worst it hides a name (and only while
-   the answer is solid proof). Instagram is skipped on purpose - its HTTP 200s
-   say nothing, which is exactly how a wrong ✅ once happened. */
+   second - instead of a 15-second browser load. The same payload also proves
+   the opposite: statusCode 10221 with no user object means "this handle does
+   not exist". The verdict is always TikTok's own JSON, never guesswork from a
+   missing marker, and the FREE answer is only trusted by checkUsername after
+   a second independent read plus the control profile. Instagram is skipped on
+   purpose - its HTTP 200s say nothing, which is exactly how a wrong ✅ once
+   happened. */
 let screenNext = 0;
-async function screenTaken(name, platform) {
-  if (platform !== 'tiktok' || process.env.HTTP_SCREEN === '0') return UNKNOWN;
+async function screenTikTok(name) {
+  if (process.env.HTTP_SCREEN === '0') return UNKNOWN;
 
   const now = Date.now();
   const at = Math.max(now, screenNext);
@@ -513,8 +589,10 @@ async function screenTaken(name, platform) {
       { headers: { Referer: 'https://www.tiktok.com/' } },
       8000
     );
-    if (res.ok && new RegExp(`"uniqueId":"${escapeRe(name)}"`, 'i').test(text)) {
-      return TAKEN;
+    if (res.ok) {
+      if (new RegExp(`"uniqueId":"${escapeRe(name)}"`, 'i').test(text)) return TAKEN;
+      const v = ttVerdictFrom(text, name);
+      if (v) return v;
     }
   } catch {
     /* WAF / network - the browser decides */
@@ -550,13 +628,28 @@ export async function checkUsername(username, platform, opts = {}) {
   // one is retried after the cooldown (nothing is cached for this answer).
   if (!opts.force && platformCooldown(platform) > 0) return UNKNOWN;
 
-  // Solid "taken" proof over plain HTTP: rejects the (many) taken candidates
-  // in about a second and leaves the slow browser path for everything that is
-  // still undecided. Only ever short-circuits to TAKEN.
-  if (!opts.fresh && !opts.confirming && (await screenTaken(name, platform)) === TAKEN) {
-    noteOutcome(platform, TAKEN);
-    cache.set(key, { status: TAKEN, at: Date.now(), ttl: CACHE_TTL });
-    return TAKEN;
+  // Solid verdicts over plain HTTP, straight from TikTok's own page payload:
+  // a taken handle is rejected in about a second, and a handle the payload
+  // calls "user not exist" is verified twice (fresh request) with the control
+  // profile in the loop - so a FREE can be handed over in ~2s without ever
+  // opening a browser. A disagreement between the two reads falls through to
+  // the browser, which decides as always.
+  if (!opts.fresh && !opts.confirming) {
+    const screened = await screenTikTok(name);
+    if (screened === TAKEN) {
+      noteOutcome(platform, TAKEN);
+      cache.set(key, { status: TAKEN, at: Date.now(), ttl: CACHE_TTL });
+      return TAKEN;
+    }
+    if (screened === FREE) {
+      await new Promise((r) => setTimeout(r, 1300));
+      const again = await screenTikTok(name);
+      if (again === FREE && (await controlAlive(platform))) {
+        noteOutcome(platform, FREE);
+        cache.set(key, { status: FREE, at: Date.now(), ttl: 15 * 60_000 });
+        return FREE;
+      }
+    }
   }
 
   await stagger(platform);
