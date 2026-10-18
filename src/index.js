@@ -20,6 +20,7 @@ import {
   TAKEN,
   UNKNOWN,
   mapPool,
+  platformCooldown,
 } from './checker.js';
 import {
   generateCandidates,
@@ -192,15 +193,29 @@ async function runCheck(ctx, names) {
     .catch(() => {});
 }
 
-/* Hard limits so "keep looking" never turns into an endless wait:
-   stop at the target, at N checks, or after ~4.5 minutes - whichever first. */
-const GEN_MAX_CHECKS = (target) => Math.min(72, target * 5 + 12);
-const GEN_TIME_BUDGET = 4.5 * 60_000;
+/* The user asked for a delivery, not a report: keep searching until the
+   requested number is really on the table. Hard caps (checks + minutes) still
+   apply so an impossible type cannot hang the bot forever. */
+const GEN_MAX_CHECKS = (target) => Math.min(150, target * 10 + 15);
+const GEN_TIME_BUDGET = 10 * 60_000;
+
+/* Short types (3-4 letters) are practically all registered. Instead of
+   answering "nothing found", widen one step at a time - and LABEL every widened
+   hit with its real type - so the user still gets usable, verified names. */
+const GEN_WIDEN = {
+  tri: ['tri', 'quasi3'],
+  quad: ['quad', 'quasi4'],
+  quasi3: ['quasi3', 'tri', 'quad'],
+  quasi4: ['quasi4', 'quasi3', 'normal'],
+  premium: ['premium', 'normal'],
+  normal: ['normal', 'premium'],
+};
 
 async function runGen(ctx, mode, count) {
   const st = stateOf(ctx.chat.id);
   st.genMode = mode;
   const { platforms } = st;
+  const order = GEN_WIDEN[mode] || [mode];
   const label = GEN_MODES[mode].label;
   const platform = platforms[0];
 
@@ -209,17 +224,21 @@ async function runGen(ctx, mode, count) {
 
   const msg = await ctx.reply(
     `🎲 توليد <b>${label}</b> — هدور <b>لحد ما ألاقي ${target}</b> يوزر متاح مؤكد` +
-      ` (أقصى ${maxChecks} فحص) على ${RULES[platform].label} ...`,
+      ` (ممكن ياخد لحد ~10 دقايق لو النوع ده نادر). لو قلّ <b>${label}</b> هوسّع` +
+      ` لحد الأنواع المجاورة وأكتبلك نوع كل اسم. على ${platforms
+        .map((p) => RULES[p].label)
+        .join(' + ')} ...`,
     { parse_mode: 'HTML' }
   );
 
   const started = Date.now();
   const seen = new Set();
-  const found = new Map(); // name -> [platforms where it is free]
+  const found = new Map(); // name -> { mode, ps: [platforms where it is free] }
   const unknownSet = new Set();
   let checked = 0;
   let taken = 0;
   let unknown = 0;
+  let waveIndex = 0;
   let lastEdit = 0;
 
   const stopReason = () => {
@@ -244,14 +263,16 @@ async function runGen(ctx, mode, count) {
       .catch(() => {});
   };
 
-  const consider = (name, res) => {
+  const consider = (name, res, waveMode) => {
     const freeOn = platforms.filter((p) => res[p] === FREE);
     if (freeOn.length) {
-      found.set(name, freeOn);
+      found.set(name, { mode: waveMode, ps: freeOn });
       unknownSet.delete(name);
       return;
     }
-    if (platforms.every((p) => res[p] === TAKEN)) {
+    // A single firm "taken" on any platform settles the name; only when
+    // nobody answered at all do we keep it out as uncertain.
+    if (platforms.some((p) => res[p] === TAKEN)) {
       taken += 1;
       unknownSet.delete(name);
       return;
@@ -265,55 +286,81 @@ async function runGen(ctx, mode, count) {
   const budgetLeft = () =>
     found.size < target && checked < maxChecks && Date.now() - started < GEN_TIME_BUDGET;
 
+  // If every platform is cooling down from throttling, wait out the shortest
+  // cooldown instead of burning checks on guaranteed-"unknown" answers.
+  const waitOutCooldown = async () => {
+    const left = platforms.map((p) => platformCooldown(p)).filter((ms) => ms > 0);
+    if (!left.length) return;
+    await progress('المنصات راجعة من الحظر — مستني شوية');
+    await new Promise((r) => setTimeout(r, Math.min(15_000, ...left)));
+  };
+
   // --- wave after wave of fresh candidates until the target is met -------
   while (budgetLeft()) {
-    const wave = generateCandidates(Math.max(target * 3, 18), { platform, mode }).filter(
-      (n) => !seen.has(n.toLowerCase())
-    );
-    if (!wave.length) break; // generator keeps producing the same shapes
+    const step =
+      waveIndex < 4 ? 0 : Math.min(order.length - 1, Math.floor((waveIndex - 4) / 3) + 1);
+    const waveMode = order[step];
+    waveIndex += 1;
+
+    const wave = generateCandidates(Math.max(target * 2, 12), {
+      platform,
+      mode: waveMode,
+    }).filter((n) => !seen.has(n.toLowerCase()));
+    if (!wave.length) {
+      if (step >= order.length - 1) break; // the whole ladder is dry
+      continue;
+    }
     for (const n of wave) seen.add(n.toLowerCase());
 
     const rows = await mapPool(wave, PARALLEL, async (name) => {
       if (!budgetLeft()) return null;
+      await waitOutCooldown();
+      if (!budgetLeft()) return null;
       checked += 1;
       const res = await checkOn(name, platforms);
-      await progress();
-      return { name, res };
+      await progress(step > 0 ? `بيوسّع: ${GEN_MODES[waveMode].label}` : 'بيفحص');
+      return { name, res, waveMode };
     });
 
     for (const row of rows) {
       if (!row) continue;
-      consider(row.name, row.res);
+      consider(row.name, row.res, row.waveMode);
       if (found.size >= target) break;
     }
   }
 
   // --- an "unknown" is usually a transient throttle: give it one more go --
   if (found.size < target && unknownSet.size) {
-    const retry = [...unknownSet].slice(0, 12);
+    const retry = [...unknownSet].slice(0, 20);
     for (const name of retry) {
+      if (!budgetLeft()) break;
+      await waitOutCooldown();
       if (!budgetLeft()) break;
       checked += 1;
       unknown = Math.max(0, unknown - 1);
-      consider(name, await checkOn(name, platforms, { fresh: true }));
+      consider(name, await checkOn(name, platforms, { fresh: true }), mode);
       await progress('برجّع المش مؤكد');
     }
   }
 
-  const freeRows = [...found.entries()].map(
-    ([name, ps]) => `  • @${name} — ${ps.map((p) => RULES[p].label).join('+')}`
-  );
+  const freeRows = [...found.entries()].map(([name, info]) => {
+    const typeTag = info.mode === mode ? '' : ` (${GEN_MODES[info.mode].label})`;
+    return `  • @${name}${typeTag} — ${info.ps.map((p) => RULES[p].label).join('+')}`;
+  });
+  const widened = [...found.values()].filter((i) => i.mode !== mode).length;
   const stats =
     `\n\n📊 فحصت <b>${checked}</b> يوزر (${stopReason()}):` +
     ` <b>${found.size}</b> متاحة ✅` +
     ` — ${taken} محجوز ❌` +
-    (unknown ? ` — ${unknown} مش مؤكد (مخفى) ⚠️` : '');
+    (unknown ? ` — ${unknown} مش مؤكد (مخفى) ⚠️` : '') +
+    (widened ? `\n🔎 منه ${widened} من الأنواع المجاورة (مكتوب جنبها نوعها)` : '');
 
   const body = freeRows.length
-    ? (found.size < target
-        ? `🎯 <b>المتاحة لحد دلوقتي (${found.size} من ${target}):</b>\n`
-        : `🎯 <b>المتاحة فعلاً (${found.size} من ${target}):</b>\n`) + freeRows.join('\n')
-    : 'لسه مالقيت أي اسم متاح <b>متأكد منه</b> في النوع ده — الأسماء القصيرة بتتملى بسرعة.';
+    ? (found.size >= target
+        ? `🎯 <b>تمام — ${target} يوزر متاح مؤكد:</b>\n`
+        : `🎯 <b>لقيت ${found.size} من ${target} لحد دلوقتي:</b>\n`) + freeRows.join('\n')
+    : `🔍 فحصت <b>${checked}</b> يوزر وكلهم محجوزين أو المنصات كانت مقفولة (حظر مؤقت).` +
+      ' البوت مش بوريك غير المتاح فعلًا — عشان كده مفيش اسم يظهر دلوقتي.';
 
   await ctx.api
     .editMessageText(ctx.chat.id, msg.message_id, body + stats, {

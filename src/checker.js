@@ -35,11 +35,38 @@ function stagger(platform) {
   const wait = at - now;
   return wait > 0 ? new Promise((r) => setTimeout(r, wait)) : Promise.resolve();
 }
+/* A platform that keeps answering "unknown" is being throttled. Hammering it
+   burns the whole time budget and turns EVERY name into "unknown" (the user
+   then sees zero results), so after a streak of misses we cool it down and
+   skip it for a while. Names can still be decided by the other platform, and
+   the cooled one is retried once the cooldown passes. */
+const COOLDOWN_AFTER = 5; // consecutive unknowns
+const COOLDOWN_MS = 60_000;
+const streaks = { tiktok: 0, instagram: 0 };
+const cooledUntil = { tiktok: 0, instagram: 0 };
+
+/** ms left before this platform accepts checks again (0 = healthy). */
+export function platformCooldown(platform) {
+  const until = cooledUntil[platform] || 0;
+  return Math.max(0, until - Date.now());
+}
+
 function noteOutcome(platform, status) {
   const g = gates[platform];
   if (!g) return;
-  if (status === UNKNOWN) g.gap = Math.min(3500, g.gap * 1.5);
-  else g.gap = Math.max(BASE_GAP[platform], g.gap * 0.85);
+  if (status === UNKNOWN) {
+    g.gap = Math.min(3500, g.gap * 1.5);
+    streaks[platform] += 1;
+    if (streaks[platform] >= COOLDOWN_AFTER) {
+      cooledUntil[platform] = Date.now() + COOLDOWN_MS;
+      streaks[platform] = 0;
+      console.error(`[throttle] ${platform} is answering junk - cooling down ${COOLDOWN_MS / 1000}s`);
+    }
+    return;
+  }
+  g.gap = Math.max(BASE_GAP[platform], g.gap * 0.85);
+  streaks[platform] = 0;
+  cooledUntil[platform] = 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -468,6 +495,11 @@ export async function checkUsername(username, platform, opts = {}) {
   const key = `${platform}:${name.toLowerCase()}`;
   const hit = cache.get(key);
   if (!opts.fresh && hit && Date.now() - hit.at < (hit.ttl || CACHE_TTL)) return hit.status;
+
+  // Throttled platform: it would only answer junk. Skip it cheaply instead of
+  // burning the time budget - the caller can use the other platform and this
+  // one is retried after the cooldown (nothing is cached for this answer).
+  if (!opts.force && platformCooldown(platform) > 0) return UNKNOWN;
 
   await stagger(platform);
 

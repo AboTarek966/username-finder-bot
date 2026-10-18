@@ -44,8 +44,8 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           # Google Chrome is preinstalled on GitHub's Ubuntu runners.
           BROWSER_PATH: /usr/bin/google-chrome
-          BROWSER_PAGES: '3'
-          CHECK_PARALLEL: '3'
+          BROWSER_PAGES: '5'
+          CHECK_PARALLEL: '4'
           BLOCK_RESOURCES: '2'
         run: |
           # Keep the bot alive for the whole 6h window:
