@@ -3,3 +3,7 @@ node_modules/
 *.log
 
 *-deploy.zip
+
+tmp-test.mjs
+tmp-*.txt
+tmp-*.cjs
