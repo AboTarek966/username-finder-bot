@@ -456,6 +456,8 @@ async function viaHttpInstagram(name) {
         ...(await igAuth()),
       },
     });
+    // Login wall = no answer about this profile (never a verdict).
+    if (/\/accounts\/login/.test(res.url || '')) return UNKNOWN;
     if (res.status === 404) return FREE;
     if (res.status === 200 && /property="og:description"|profilePage_/i.test(text)) return TAKEN;
   } catch {
@@ -583,14 +585,21 @@ async function igAuth() {
         },
         10_000
       );
-      // Profile markers only reach a logged-in visitor from a server IP, so
-      // their presence means the session really works right now.
-      igSessionState.ok =
-        Boolean(res.ok) &&
-        (/profilePage_/.test(text) || /property="og:description"/i.test(text));
-      if (!igSessionState.ok) {
-        console.warn('[ig] session cookie did not open the control profile - ignoring it');
+      const markers =
+        /profilePage_/.test(text) || /property="og:description"/i.test(text);
+      if (/\/accounts\/login/.test(res.url || '')) {
+        // Definitive: Instagram bounced us to the login wall -> cookie dead.
+        igSessionState.ok = false;
+        console.warn('[ig] session cookie hit the login wall - ignoring it');
+      } else if (markers) {
+        // Definitive: profile markers reached us from a server IP -> works.
+        igSessionState.ok = true;
       }
+      // Otherwise the response was a generic shell (Instagram flaps between
+      // shell and full HTML): INCONCLUSIVE - keep the previous verdict
+      // instead of dropping a working cookie over one lazy answer.
+      // (The browser always carries the cookie either way; this only decides
+      // whether the fast HTTP screens get it too.)
     } catch {
       /* network hiccup: keep the previous verdict */
     }
@@ -622,6 +631,9 @@ async function screenIG(name) {
       },
       8000
     );
+    // Bounced to the login wall: that page is not an answer about ANY
+    // profile - reading it as "taken" would be exactly the wrong ✅.
+    if (/\/accounts\/login/.test(res.url || '')) return UNKNOWN;
     if (res.ok) {
       if (/profilePage_/.test(text) || /property="og:description"/i.test(text)) return TAKEN;
       if (new RegExp(`"username":"${escapeRe(name)}"`, 'i').test(text)) return TAKEN;
