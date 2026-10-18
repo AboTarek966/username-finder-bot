@@ -30,6 +30,15 @@ import {
   MODE_KEYS,
 } from './generator.js';
 import { deepHunt, worstCaseNote } from './hunter.js';
+import {
+  startInventory,
+  stopInventory,
+  waitForInventory,
+  takeFromInventory,
+  setDemand,
+  holdInventory,
+  releaseInventory,
+} from './inventory.js';
 import { closeBrowser, findBrowser } from './browser.js';
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -165,7 +174,7 @@ function progressEditor(ctx, messageId) {
 
 /* ------------------------------ actions ------------------------------ */
 
-async function runCheck(ctx, names) {
+async function runCheckInner(ctx, names) {
   const { platforms } = stateOf(ctx.chat.id);
   const labels = platforms.map((p) => RULES[p].label).join(' + ');
 
@@ -193,184 +202,117 @@ async function runCheck(ctx, names) {
     .catch(() => {});
 }
 
-/* The user asked for a delivery, not a report: keep searching until the
-   requested number is really on the table. Hard caps (checks + minutes) still
-   apply so an impossible type cannot hang the bot forever. */
-const GEN_MAX_CHECKS = (target) => Math.min(150, target * 10 + 15);
-const GEN_TIME_BUDGET = 10 * 60_000;
-
-/* Short types (3-4 letters) are practically all registered. Instead of
-   answering "nothing found", widen one step at a time - and LABEL every widened
-   hit with its real type - so the user still gets usable, verified names. */
-const GEN_WIDEN = {
-  tri: ['tri', 'quasi3'],
-  quad: ['quad', 'quasi4'],
-  quasi3: ['quasi3', 'tri', 'quad'],
-  quasi4: ['quasi4', 'quasi3', 'normal'],
-  premium: ['premium', 'normal'],
-  normal: ['normal', 'premium'],
+/* Manual commands (check / scan / deep) get the page pool to themselves:
+   the background inventory holds off until they are done. */
+const guarded = (fn) => (...args) => {
+  holdInventory();
+  return fn(...args).finally(releaseInventory);
 };
+const runCheck = guarded(runCheckInner);
+const runScan = guarded(runScanInner);
+const runDeep = guarded(runDeepInner);
 
-async function runGen(ctx, mode, count) {
-  const st = stateOf(ctx.chat.id);
-  st.genMode = mode;
-  const { platforms } = st;
-  const order = GEN_WIDEN[mode] || [mode];
-  const label = GEN_MODES[mode].label;
-  const platform = platforms[0];
+/* Reply contract (what the user asked for):
+     - never answer with "nothing found"
+     - never keep them waiting longer than ~30 seconds
+   Both only work if the search is already running in the background, so the
+   answer comes from a warm inventory (src/inventory.js) and the FIRST reply
+   only ever goes out with real, double-verified names in it. Anything still
+   missing is appended to that same message by edit - no second ping, no
+   "try again". */
+const GEN_FIRST_WAIT = 20_000; // warm buffer: full answer, or whatever we have
+const GEN_EMPTY_WAIT = 60_000; // cold buffer: wait for real names, not a report
+const GEN_TOPUP_MS = 12 * 60_000; // keep topping the message up after replying
+const GEN_MAX = 16; // inventory keeps up to 16 per type
 
-  const target = Math.max(1, Number(count) || 8);
-  const maxChecks = GEN_MAX_CHECKS(target);
-
-  const msg = await ctx.reply(
-    `🎲 توليد <b>${label}</b> — هدور <b>لحد ما ألاقي ${target}</b> يوزر متاح مؤكد` +
-      ` (ممكن ياخد لحد ~10 دقايق لو النوع ده نادر). لو قلّ <b>${label}</b> هوسّع` +
-      ` لحد الأنواع المجاورة وأكتبلك نوع كل اسم. على ${platforms
-        .map((p) => RULES[p].label)
-        .join(' + ')} ...`,
-    { parse_mode: 'HTML' }
+function genLines(entries, mode) {
+  return [...entries.values()].map(
+    (item) =>
+      `  • @${item.name}${
+        item.mode === mode ? '' : ` (${GEN_MODES[item.mode].label})`
+      } — ${item.freeOn.map((p) => RULES[p].label).join('+')}`
   );
+}
 
-  const started = Date.now();
-  const seen = new Set();
-  const found = new Map(); // name -> { mode, ps: [platforms where it is free] }
-  const unknownSet = new Set();
-  let checked = 0;
-  let taken = 0;
-  let unknown = 0;
-  let waveIndex = 0;
+function genText(rows, mode, target, filling) {
+  const head = filling
+    ? `🎯 <b>لقيت ${rows.size} من ${target} — الباقي في طريقه:</b>`
+    : rows.size >= target
+      ? `🎯 <b>تمام — ${target} يوزر متاح مؤكد:</b>`
+      : `🎯 <b>${rows.size} يوزر متاح مؤكد (من ${target}):</b>`;
+  const foot = filling
+    ? '\n\n⏳ كل اسم هنا متأكد بفحصين — والباقي هيتمضاف في نفس الرسالة دي.'
+    : rows.size >= target
+      ? '\n\n✅ الكل متأكد بفحصين ومتاح فعليًا دلوقتي.'
+      : '\n\n⚠️ المنصات بتردّ ببطء (حظر مؤقت) — الباقي هيوصل في نفس الرسالة.';
+  return head + '\n' + genLines(rows, mode).join('\n') + foot;
+}
+
+/* Grow the very same message until the requested count is on it. */
+async function topUp(ctx, messageId, rows, mode, target, platforms) {
+  const deadline = Date.now() + GEN_TOPUP_MS;
   let lastEdit = 0;
-
-  const stopReason = () => {
-    if (found.size >= target) return 'وصلت للعدد المطلوب ✅';
-    if (checked >= maxChecks) return 'وصلت لأقصى عدد فحوصات';
-    return 'خلص الوقت المحدد';
-  };
-
-  const progress = async (note = 'بيفحص') => {
+  while (rows.size < target && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 2500));
+    const more = takeFromInventory(mode, target - rows.size, platforms);
+    if (!more.length) continue;
+    for (const item of more) rows.set(item.name, item);
     const now = Date.now();
-    if (now - lastEdit < 2500) return;
-    lastEdit = now;
-    const filled = Math.min(10, Math.round((checked / maxChecks) * 10));
-    await ctx.api
-      .editMessageText(
-        ctx.chat.id,
-        msg.message_id,
-        `🎲 ${label}\n${note} ${checked}/${maxChecks} فحص` +
-          ` — 🎯 لقيت ${found.size}/${target}` +
-          `\n[${'█'.repeat(filled)}${'░'.repeat(10 - filled)}]`
-      )
-      .catch(() => {});
-  };
-
-  const consider = (name, res, waveMode) => {
-    const freeOn = platforms.filter((p) => res[p] === FREE);
-    if (freeOn.length) {
-      found.set(name, { mode: waveMode, ps: freeOn });
-      unknownSet.delete(name);
-      return;
-    }
-    // A single firm "taken" on any platform settles the name; only when
-    // nobody answered at all do we keep it out as uncertain.
-    if (platforms.some((p) => res[p] === TAKEN)) {
-      taken += 1;
-      unknownSet.delete(name);
-      return;
-    }
-    if (!unknownSet.has(name)) {
-      unknownSet.add(name);
-      unknown += 1;
-    }
-  };
-
-  const budgetLeft = () =>
-    found.size < target && checked < maxChecks && Date.now() - started < GEN_TIME_BUDGET;
-
-  // If every platform is cooling down from throttling, wait out the shortest
-  // cooldown instead of burning checks on guaranteed-"unknown" answers.
-  const waitOutCooldown = async () => {
-    const left = platforms.map((p) => platformCooldown(p)).filter((ms) => ms > 0);
-    if (!left.length) return;
-    await progress('المنصات راجعة من الحظر — مستني شوية');
-    await new Promise((r) => setTimeout(r, Math.min(15_000, ...left)));
-  };
-
-  // --- wave after wave of fresh candidates until the target is met -------
-  while (budgetLeft()) {
-    const step =
-      waveIndex < 4 ? 0 : Math.min(order.length - 1, Math.floor((waveIndex - 4) / 3) + 1);
-    const waveMode = order[step];
-    waveIndex += 1;
-
-    const wave = generateCandidates(Math.max(target * 2, 12), {
-      platform,
-      mode: waveMode,
-    }).filter((n) => !seen.has(n.toLowerCase()));
-    if (!wave.length) {
-      if (step >= order.length - 1) break; // the whole ladder is dry
-      continue;
-    }
-    for (const n of wave) seen.add(n.toLowerCase());
-
-    const rows = await mapPool(wave, PARALLEL, async (name) => {
-      if (!budgetLeft()) return null;
-      await waitOutCooldown();
-      if (!budgetLeft()) return null;
-      checked += 1;
-      const res = await checkOn(name, platforms);
-      await progress(step > 0 ? `بيوسّع: ${GEN_MODES[waveMode].label}` : 'بيفحص');
-      return { name, res, waveMode };
-    });
-
-    for (const row of rows) {
-      if (!row) continue;
-      consider(row.name, row.res, row.waveMode);
-      if (found.size >= target) break;
+    if (rows.size >= target || now - lastEdit > 5000) {
+      lastEdit = now;
+      await ctx.api
+        .editMessageText(ctx.chat.id, messageId, genText(rows, mode, target, rows.size < target), {
+          parse_mode: 'HTML',
+        })
+        .catch(() => {});
     }
   }
-
-  // --- an "unknown" is usually a transient throttle: give it one more go --
-  if (found.size < target && unknownSet.size) {
-    const retry = [...unknownSet].slice(0, 20);
-    for (const name of retry) {
-      if (!budgetLeft()) break;
-      await waitOutCooldown();
-      if (!budgetLeft()) break;
-      checked += 1;
-      unknown = Math.max(0, unknown - 1);
-      consider(name, await checkOn(name, platforms, { fresh: true }), mode);
-      await progress('برجّع المش مؤكد');
-    }
-  }
-
-  const freeRows = [...found.entries()].map(([name, info]) => {
-    const typeTag = info.mode === mode ? '' : ` (${GEN_MODES[info.mode].label})`;
-    return `  • @${name}${typeTag} — ${info.ps.map((p) => RULES[p].label).join('+')}`;
-  });
-  const widened = [...found.values()].filter((i) => i.mode !== mode).length;
-  const stats =
-    `\n\n📊 فحصت <b>${checked}</b> يوزر (${stopReason()}):` +
-    ` <b>${found.size}</b> متاحة ✅` +
-    ` — ${taken} محجوز ❌` +
-    (unknown ? ` — ${unknown} مش مؤكد (مخفى) ⚠️` : '') +
-    (widened ? `\n🔎 منه ${widened} من الأنواع المجاورة (مكتوب جنبها نوعها)` : '');
-
-  const body = freeRows.length
-    ? (found.size >= target
-        ? `🎯 <b>تمام — ${target} يوزر متاح مؤكد:</b>\n`
-        : `🎯 <b>لقيت ${found.size} من ${target} لحد دلوقتي:</b>\n`) + freeRows.join('\n')
-    : `🔍 فحصت <b>${checked}</b> يوزر وكلهم محجوزين أو المنصات كانت مقفولة (حظر مؤقت).` +
-      ' البوت مش بوريك غير المتاح فعلًا — عشان كده مفيش اسم يظهر دلوقتي.';
-
   await ctx.api
-    .editMessageText(ctx.chat.id, msg.message_id, body + stats, {
+    .editMessageText(ctx.chat.id, messageId, genText(rows, mode, target, false), {
       parse_mode: 'HTML',
       reply_markup: againKeyboard(mode),
     })
     .catch(() => {});
 }
 
-async function runScan(ctx, base, limit) {
+async function runGen(ctx, mode, count) {
+  const st = stateOf(ctx.chat.id);
+  st.genMode = mode;
+  const { platforms } = st;
+  setDemand(platforms);
+  const target = Math.max(1, Math.min(GEN_MAX, Number(count) || 8));
+
+  // --- silent wait: never reply with a report when the user wants names --
+  await waitForInventory(mode, target, GEN_FIRST_WAIT);
+  let picked = takeFromInventory(mode, target, platforms);
+  if (!picked.length) {
+    // Nothing on hand at all (cold start): the user asked never to be told
+    // "nothing found", so we stay silent until the first name is verified.
+    // The status line below is the last resort for a full double outage.
+    await waitForInventory(mode, 1, GEN_EMPTY_WAIT);
+    picked = takeFromInventory(mode, target, platforms);
+  }
+
+  const rows = new Map(picked.map((i) => [i.name, i]));
+  const filling = rows.size < target;
+
+  // Cold start / both platforms throttled: say ONE short status line (never
+  // "nothing found") and let the same message collect the names as they are
+  // verified.
+  if (!rows.size) {
+    const msg = await ctx.reply('⏳ بتأكّد أسماء جديدة دلوقتي — أول ما تتأكد هيوصلوا هنا.');
+    topUp(ctx, msg.message_id, rows, mode, target, platforms).catch(() => {});
+    return;
+  }
+
+  const msg = await ctx.reply(genText(rows, mode, target, filling), {
+    parse_mode: 'HTML',
+    reply_markup: filling ? undefined : againKeyboard(mode),
+  });
+  topUp(ctx, msg.message_id, rows, mode, target, platforms).catch(() => {});
+}
+
+async function runScanInner(ctx, base, limit) {
   const st = stateOf(ctx.chat.id);
   const { platforms } = st;
   const platform = platforms[0];
@@ -440,7 +382,7 @@ async function runScan(ctx, base, limit) {
  * Deep hunt: check a large pool, then re-check every "free" hit on a fresh
  * page (cache bypassed) so we only report names that are really available.
  */
-async function runDeep(ctx, base, mode) {
+async function runDeepInner(ctx, base, mode) {
   const st = stateOf(ctx.chat.id);
   const { platforms } = st;
   const labels = platforms.map((p) => RULES[p].label).join(' + ');
@@ -682,6 +624,7 @@ bot.catch(async (err) => {
 
 async function shutdown(signal) {
   console.log(`\n${signal} - closing browser...`);
+  stopInventory();
   await closeBrowser().catch(() => {});
   await bot.stop().catch(() => {});
   process.exit(0);
@@ -697,6 +640,10 @@ if (!findBrowser()) {
 // drive runGen/runScan/runDeep directly - without ever touching Telegram.
 // Never set it on the server: the deployed bot must always poll.
 export { runGen, runScan, runDeep, runCheck };
+
+// Fill the inventory right away so the first "generate" tap of the day is
+// answered from a warm buffer instead of making the user wait for a search.
+startInventory();
 
 if (process.env.DISABLE_POLLING !== '1') {
   bot.start({

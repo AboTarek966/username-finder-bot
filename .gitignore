@@ -1,9 +1,6 @@
 node_modules/
 .env
 *.log
-
 *-deploy.zip
-
-tmp-test.mjs
-tmp-*.txt
-tmp-*.cjs
+tmp-*
+data/

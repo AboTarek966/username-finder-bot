@@ -44,8 +44,8 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           # Google Chrome is preinstalled on GitHub's Ubuntu runners.
           BROWSER_PATH: /usr/bin/google-chrome
-          BROWSER_PAGES: '5'
-          CHECK_PARALLEL: '4'
+          BROWSER_PAGES: '6'
+          CHECK_PARALLEL: '5'
           BLOCK_RESOURCES: '2'
         run: |
           # Keep the bot alive for the whole 6h window:
@@ -69,6 +69,10 @@ jobs:
           git config user.email "bot@users.noreply.github.com"
           date -u +"last run: %Y-%m-%d %H:%M:%S UTC" > last-run.txt
           git add last-run.txt
+          # The warm inventory is saved to data/inventory.json - committing it
+          # means the next 6h run starts with names already on hand instead of
+          # making the user wait. (-f: data/ is ignored for local work.)
+          git add -f data/inventory.json 2>/dev/null || true
           git diff --cached --quiet || git commit -m "chore: keep scheduled workflow active"
           # The remote may have moved (someone pushed while we ran) - rebase first.
           git pull --rebase origin main || true

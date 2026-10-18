@@ -191,23 +191,30 @@ async function controlHealthy(page, platform, currentName) {
       ? `https://www.tiktok.com/@${CONTROL[platform]}`
       : `https://www.instagram.com/${CONTROL[platform]}/`;
 
-  let html = '';
-  await page
-    .goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 })
-    .then(async () => {
-      html = await safeContent(page);
-    })
-    .catch(() => {});
-  const title = await safeTitle(page);
-  const text = await safeText(page);
+  const probe = async () => {
+    let html = '';
+    await page
+      .goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 })
+      .then(async () => {
+        html = await safeContent(page);
+      })
+      .catch(() => {});
+    const title = await safeTitle(page);
+    const text = await safeText(page);
 
-  const isTaken =
-    platform === 'tiktok'
+    return platform === 'tiktok'
       ? /"uniqueId":"nasa"/i.test(html) || /\(@nasa\)/i.test(title)
       : /profilePage_/.test(html) ||
         /property="og:description"/i.test(html) ||
         /\(@instagram\)|@instagram/i.test(title) ||
         /followers/i.test(text);
+  };
+
+  // One retry: a single stalled control load would otherwise mark the whole
+  // view "unhealthy" for 60s and silently turn every FREE into UNKNOWN -
+  // exactly the kind of thing that starved the inventory of hits.
+  let isTaken = await probe();
+  if (!isTaken) isTaken = await probe();
 
   state.ok = isTaken;
   state.at = Date.now();
@@ -275,7 +282,11 @@ async function detectTikTok(page, name, budgetMs = 20_000) {
       // Require the message to persist after the page had time to load,
       // so we never report "free" off a half-rendered shell.
       if (freeStreak >= 3 && Date.now() - started >= 3000) return maybeFree();
-    } else if (!TT_NOT_FOUND.test(text)) {
+    } else if (text.trim().length > 200) {
+      // Real content that is NOT the not-found line contradicts "free" ->
+      // reset. An EMPTY body does not contradict anything: TikTok re-renders
+      // and the message flaps in and out, which used to turn a plainly free
+      // name into "unknown" (and starved the inventory of hits).
       freeStreak = 0;
     }
 
@@ -349,7 +360,11 @@ async function detectInstagram(page, name, budgetMs = 16_000) {
     if (onProfile && html.length > 50_000 && IG_NOT_FOUND.test(text)) {
       freeStreak += 1;
       if (freeStreak >= 3 && Date.now() - started >= 3000) return maybeFree();
-    } else if (!IG_NOT_FOUND.test(text)) {
+    } else if (text.trim().length > 200) {
+      // Real content without the not-found line = contradiction -> reset.
+      // An empty/half-rendered body is NOT a contradiction (Instagram and
+      // TikTok both flap while re-hydrating), so it no longer wipes the
+      // streak and turns a free name into "unknown".
       freeStreak = 0;
     }
 
@@ -474,6 +489,40 @@ async function viaHttpTikTok(name) {
 const HTTP = { tiktok: viaHttpTikTok, instagram: viaHttpInstagram };
 
 /* ------------------------------------------------------------------ */
+/* Cheap reject screen                                                 */
+/* ------------------------------------------------------------------ */
+
+/* Most candidates are already taken, and a plain HTTP response can PROVE
+   that for TikTok (the profile payload embeds "uniqueId":"<name>") in about a
+   second - instead of a 15-second browser load. It only ever answers "taken":
+   it can never produce a wrong ✅, at worst it hides a name (and only while
+   the answer is solid proof). Instagram is skipped on purpose - its HTTP 200s
+   say nothing, which is exactly how a wrong ✅ once happened. */
+let screenNext = 0;
+async function screenTaken(name, platform) {
+  if (platform !== 'tiktok' || process.env.HTTP_SCREEN === '0') return UNKNOWN;
+
+  const now = Date.now();
+  const at = Math.max(now, screenNext);
+  screenNext = at + 400; // screens are cheap but still hit TikTok
+  if (at > now) await new Promise((r) => setTimeout(r, at - now));
+
+  try {
+    const { res, text } = await httpGet(
+      `https://www.tiktok.com/@${encodeURIComponent(name)}`,
+      { headers: { Referer: 'https://www.tiktok.com/' } },
+      8000
+    );
+    if (res.ok && new RegExp(`"uniqueId":"${escapeRe(name)}"`, 'i').test(text)) {
+      return TAKEN;
+    }
+  } catch {
+    /* WAF / network - the browser decides */
+  }
+  return UNKNOWN;
+}
+
+/* ------------------------------------------------------------------ */
 /* Public API                                                           */
 /* ------------------------------------------------------------------ */
 
@@ -500,6 +549,15 @@ export async function checkUsername(username, platform, opts = {}) {
   // burning the time budget - the caller can use the other platform and this
   // one is retried after the cooldown (nothing is cached for this answer).
   if (!opts.force && platformCooldown(platform) > 0) return UNKNOWN;
+
+  // Solid "taken" proof over plain HTTP: rejects the (many) taken candidates
+  // in about a second and leaves the slow browser path for everything that is
+  // still undecided. Only ever short-circuits to TAKEN.
+  if (!opts.fresh && !opts.confirming && (await screenTaken(name, platform)) === TAKEN) {
+    noteOutcome(platform, TAKEN);
+    cache.set(key, { status: TAKEN, at: Date.now(), ttl: CACHE_TTL });
+    return TAKEN;
+  }
 
   await stagger(platform);
 
