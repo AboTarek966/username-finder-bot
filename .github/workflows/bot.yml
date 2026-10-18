@@ -42,6 +42,11 @@ jobs:
       - name: Run the bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          # Optional: Instagram redirects every datacenter IP to its login
+          # wall, so from a server it can only answer "unknown" unless the
+          # bot is logged in. Secret IG_SESSION = the "sessionid" cookie
+          # value of a (spare) account. Nothing breaks when it is unset.
+          IG_SESSION: ${{ secrets.IG_SESSION }}
           # Google Chrome is preinstalled on GitHub's Ubuntu runners.
           BROWSER_PATH: /usr/bin/google-chrome
           BROWSER_PAGES: '6'

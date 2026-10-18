@@ -316,6 +316,22 @@ async function detectTikTok(page, name, budgetMs = 20_000) {
 async function detectInstagram(page, name, budgetMs = 16_000) {
   const started = Date.now();
   const url = `https://www.instagram.com/${encodeURIComponent(name)}/`;
+  // Carry the owner's session (if any, repo secret IG_SESSION): Instagram
+  // only serves profile pages to logged-in visitors from datacenter IPs -
+  // without it every check lands on the login wall and can only be "unknown".
+  if (IG_SESSION) {
+    await page
+      .setCookie({
+        name: 'sessionid',
+        value: IG_SESSION,
+        domain: '.instagram.com',
+        path: '/',
+        httpOnly: true,
+        secure: true,
+        sameSite: 'None',
+      })
+      .catch(() => {});
+  }
   let httpStatus = 0;
   await page
     .goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 })
@@ -437,6 +453,7 @@ async function viaHttpInstagram(name) {
         'sec-fetch-site': 'none',
         'sec-fetch-dest': 'document',
         'upgrade-insecure-requests': '1',
+        ...(await igAuth()),
       },
     });
     if (res.status === 404) return FREE;
@@ -537,6 +554,50 @@ async function controlAlive(platform) {
   return ok;
 }
 
+/* Instagram, logged in (optional): Instagram redirects every request from a
+   datacenter IP (GitHub runners, VPSes) to its login wall - profile pages are
+   simply not served, so from a server the bot can only ever answer "unknown"
+   for Instagram. Putting the owner's own session cookie here (repo secret
+   IG_SESSION = the "sessionid" cookie value) makes Instagram answer normally
+   even from a server. Use a SPARE account: automating with a session is
+   against Instagram's terms and the account can be limited. Without it
+   nothing breaks - Instagram just stays "unknown" and TikTok carries on.
+   The cookie is re-validated once an hour against the control profile; an
+   expired/garbage cookie is dropped instead of breaking the checks. */
+const IG_SESSION = process.env.IG_SESSION || '';
+const igSessionState = { at: 0, ok: false, probed: false };
+async function igAuth() {
+  if (!IG_SESSION) return {};
+  const now = Date.now();
+  if (!igSessionState.probed || now - igSessionState.at > 60 * 60_000) {
+    igSessionState.at = now;
+    igSessionState.probed = true;
+    try {
+      const { res, text } = await httpGet(
+        `https://www.instagram.com/${CONTROL.instagram}/`,
+        {
+          headers: {
+            Referer: 'https://www.instagram.com/',
+            cookie: `sessionid=${IG_SESSION}`,
+          },
+        },
+        10_000
+      );
+      // Profile markers only reach a logged-in visitor from a server IP, so
+      // their presence means the session really works right now.
+      igSessionState.ok =
+        Boolean(res.ok) &&
+        (/profilePage_/.test(text) || /property="og:description"/i.test(text));
+      if (!igSessionState.ok) {
+        console.warn('[ig] session cookie did not open the control profile - ignoring it');
+      }
+    } catch {
+      /* network hiccup: keep the previous verdict */
+    }
+  }
+  return igSessionState.ok ? { cookie: `sessionid=${IG_SESSION}` } : {};
+}
+
 /* Instagram over plain HTTP: only a POSITIVE profile marker counts, and only
    as "taken" (og:description / profilePage_ / the page's own username JSON).
    Instagram answers a throttled visitor with a generic shell that looks
@@ -553,7 +614,12 @@ async function screenIG(name) {
   try {
     const { res, text } = await httpGet(
       `https://www.instagram.com/${encodeURIComponent(name)}/`,
-      { headers: { Referer: 'https://www.instagram.com/' } },
+      {
+        headers: {
+          Referer: 'https://www.instagram.com/',
+          ...(await igAuth()),
+        },
+      },
       8000
     );
     if (res.ok) {
