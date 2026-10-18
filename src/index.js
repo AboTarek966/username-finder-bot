@@ -24,6 +24,7 @@ import {
 import {
   generateCandidates,
   variations,
+  baseCombos,
   GEN_MODES,
   MODE_KEYS,
 } from './generator.js';
@@ -191,44 +192,129 @@ async function runCheck(ctx, names) {
     .catch(() => {});
 }
 
+/* Hard limits so "keep looking" never turns into an endless wait:
+   stop at the target, at N checks, or after ~4.5 minutes - whichever first. */
+const GEN_MAX_CHECKS = (target) => Math.min(72, target * 5 + 12);
+const GEN_TIME_BUDGET = 4.5 * 60_000;
+
 async function runGen(ctx, mode, count) {
   const st = stateOf(ctx.chat.id);
   st.genMode = mode;
   const { platforms } = st;
   const label = GEN_MODES[mode].label;
+  const platform = platforms[0];
 
-  const candidates = generateCandidates(count, { platform: platforms[0], mode });
+  const target = Math.max(1, Number(count) || 8);
+  const maxChecks = GEN_MAX_CHECKS(target);
+
   const msg = await ctx.reply(
-    `🎲 توليد <b>${label}</b>: ${candidates.length} يوزر على ${RULES[platforms[0]].label} ...`,
+    `🎲 توليد <b>${label}</b> — هدور <b>لحد ما ألاقي ${target}</b> يوزر متاح مؤكد` +
+      ` (أقصى ${maxChecks} فحص) على ${RULES[platform].label} ...`,
     { parse_mode: 'HTML' }
   );
-  const update = progressEditor(ctx, msg.message_id);
 
-  const rows = await mapPool(candidates, PARALLEL, async (name, i) => {
-    const res = await checkOn(name, platforms);
-    await update(i + 1, candidates.length, 'بيفحص');
-    const status = platforms.map((p) => res[p]);
-    return {
-      name,
-      free: status.includes(FREE),
-      taken: status.every((s) => s === TAKEN),
-    };
-  });
+  const started = Date.now();
+  const seen = new Set();
+  const found = new Map(); // name -> [platforms where it is free]
+  const unknownSet = new Set();
+  let checked = 0;
+  let taken = 0;
+  let unknown = 0;
+  let lastEdit = 0;
 
-  // Only names that survived the double verification are ever listed by
-  // name; everything else is reduced to counts so a shaky answer can never
-  // look like a result.
-  const freeOnes = rows.filter((r) => r.free).map((r) => `  • @${r.name}`);
-  const takenCount = rows.filter((r) => !r.free && r.taken).length;
-  const unknownCount = rows.filter((r) => !r.free && !r.taken).length;
+  const stopReason = () => {
+    if (found.size >= target) return 'وصلت للعدد المطلوب ✅';
+    if (checked >= maxChecks) return 'وصلت لأقصى عدد فحوصات';
+    return 'خلص الوقت المحدد';
+  };
+
+  const progress = async (note = 'بيفحص') => {
+    const now = Date.now();
+    if (now - lastEdit < 2500) return;
+    lastEdit = now;
+    const filled = Math.min(10, Math.round((checked / maxChecks) * 10));
+    await ctx.api
+      .editMessageText(
+        ctx.chat.id,
+        msg.message_id,
+        `🎲 ${label}\n${note} ${checked}/${maxChecks} فحص` +
+          ` — 🎯 لقيت ${found.size}/${target}` +
+          `\n[${'█'.repeat(filled)}${'░'.repeat(10 - filled)}]`
+      )
+      .catch(() => {});
+  };
+
+  const consider = (name, res) => {
+    const freeOn = platforms.filter((p) => res[p] === FREE);
+    if (freeOn.length) {
+      found.set(name, freeOn);
+      unknownSet.delete(name);
+      return;
+    }
+    if (platforms.every((p) => res[p] === TAKEN)) {
+      taken += 1;
+      unknownSet.delete(name);
+      return;
+    }
+    if (!unknownSet.has(name)) {
+      unknownSet.add(name);
+      unknown += 1;
+    }
+  };
+
+  const budgetLeft = () =>
+    found.size < target && checked < maxChecks && Date.now() - started < GEN_TIME_BUDGET;
+
+  // --- wave after wave of fresh candidates until the target is met -------
+  while (budgetLeft()) {
+    const wave = generateCandidates(Math.max(target * 3, 18), { platform, mode }).filter(
+      (n) => !seen.has(n.toLowerCase())
+    );
+    if (!wave.length) break; // generator keeps producing the same shapes
+    for (const n of wave) seen.add(n.toLowerCase());
+
+    const rows = await mapPool(wave, PARALLEL, async (name) => {
+      if (!budgetLeft()) return null;
+      checked += 1;
+      const res = await checkOn(name, platforms);
+      await progress();
+      return { name, res };
+    });
+
+    for (const row of rows) {
+      if (!row) continue;
+      consider(row.name, row.res);
+      if (found.size >= target) break;
+    }
+  }
+
+  // --- an "unknown" is usually a transient throttle: give it one more go --
+  if (found.size < target && unknownSet.size) {
+    const retry = [...unknownSet].slice(0, 12);
+    for (const name of retry) {
+      if (!budgetLeft()) break;
+      checked += 1;
+      unknown = Math.max(0, unknown - 1);
+      consider(name, await checkOn(name, platforms, { fresh: true }));
+      await progress('برجّع المش مؤكد');
+    }
+  }
+
+  const freeRows = [...found.entries()].map(
+    ([name, ps]) => `  • @${name} — ${ps.map((p) => RULES[p].label).join('+')}`
+  );
   const stats =
-    `\n\n📊 من <b>${rows.length}</b> يوزر:` +
-    ` <b>${freeOnes.length}</b> متاحة ✅` +
-    ` — ${takenCount} محجوز ❌` +
-    (unknownCount ? ` — ${unknownCount} مش مؤكد (مخفى عمدًا) ⚠️` : '');
-  const body = freeOnes.length
-    ? `🎯 <b>المتاحة فعلاً (مؤكدة بفحصين):</b>\n${freeOnes.join('\n')}`
-    : '\nمفيش اسم متاح مؤكد في الدفعة دي — كرّر أو جرّب نوع توليد تاني.';
+    `\n\n📊 فحصت <b>${checked}</b> يوزر (${stopReason()}):` +
+    ` <b>${found.size}</b> متاحة ✅` +
+    ` — ${taken} محجوز ❌` +
+    (unknown ? ` — ${unknown} مش مؤكد (مخفى) ⚠️` : '');
+
+  const body = freeRows.length
+    ? (found.size < target
+        ? `🎯 <b>المتاحة لحد دلوقتي (${found.size} من ${target}):</b>\n`
+        : `🎯 <b>المتاحة فعلاً (${found.size} من ${target}):</b>\n`) + freeRows.join('\n')
+    : 'لسه مالقيت أي اسم متاح <b>متأكد منه</b> في النوع ده — الأسماء القصيرة بتتملى بسرعة.';
+
   await ctx.api
     .editMessageText(ctx.chat.id, msg.message_id, body + stats, {
       parse_mode: 'HTML',
@@ -257,6 +343,31 @@ async function runScan(ctx, base, limit) {
     return { name, status };
   });
 
+  // The obvious variations are usually taken. Rather than answering "none",
+  // widen the net around the same word (base_x_nova, the.base, base407...)
+  // before we report anything.
+  if (!rows.some((r) => r.status === FREE)) {
+    const extra = baseCombos(base, { platform, count: 18 }).filter(
+      (n) => !list.includes(n)
+    );
+    if (extra.length) {
+      await ctx.api
+        .editMessageText(
+          ctx.chat.id,
+          msg.message_id,
+          `🧩 مافيش في الصيغ المباشرة — بيدوس أوسع حول <b>${base}</b> (${extra.length} تركيبة) ...`,
+          { parse_mode: 'HTML' }
+        )
+        .catch(() => {});
+      const more = await mapPool(extra, PARALLEL, async (name, i) => {
+        const status = await checkUsername(name, platform);
+        await update(i + 1, extra.length, 'بيركّب تركيبات');
+        return { name, status };
+      });
+      rows.push(...more);
+    }
+  }
+
   // Same rule as generation: name only what survived the double check.
   const freeOnes = rows
     .filter((r) => r.status === FREE)
@@ -264,13 +375,13 @@ async function runScan(ctx, base, limit) {
   const takenCount = rows.filter((r) => r.status === TAKEN).length;
   const unknownCount = rows.filter((r) => r.status === UNKNOWN).length;
   const stats =
-    `\n\n📊 من <b>${rows.length}</b> صيغة:` +
+    `\n\n📊 فحصت <b>${rows.length}</b> صيغة:` +
     ` <b>${freeOnes.length}</b> متاحة ✅` +
     ` — ${takenCount} محجوزة ❌` +
-    (unknownCount ? ` — ${unknownCount} مش مؤكدة (مخفية عمدًا) ⚠️` : '');
+    (unknownCount ? ` — ${unknownCount} مش مؤكدة (مخفية عمدًا) ⠶` : '');
   const body = freeOnes.length
     ? `🎯 <b>المتاحة فعلاً (مؤكدة بفحصين):</b>\n${freeOnes.join('\n')}`
-    : '\nمفيش صيغة متاحة متأكدة منها للاسم ده — جرّب كلمة تانية.';
+    : `لسه مالقيت صيغة متاحة حول <b>${base}</b> بعد ${rows.length} محاولة — الاسم ده شعبي جدًا.`;
   await ctx.api
     .editMessageText(ctx.chat.id, msg.message_id, body + stats, {
       parse_mode: 'HTML',
@@ -535,7 +646,14 @@ if (!findBrowser()) {
   console.warn('⚠️ No Chrome/Edge found - falling back to HTTP checks (less accurate).');
 }
 
-bot.start({
-  onStart: (me) => console.log(`Bot running as @${me.username}`),
-  drop_pending_updates: true,
-});
+// Test hook: DISABLE_POLLING=1 lets a local script import this module and
+// drive runGen/runScan/runDeep directly - without ever touching Telegram.
+// Never set it on the server: the deployed bot must always poll.
+export { runGen, runScan, runDeep, runCheck };
+
+if (process.env.DISABLE_POLLING !== '1') {
+  bot.start({
+    onStart: (me) => console.log(`Bot running as @${me.username}`),
+    drop_pending_updates: true,
+  });
+}
