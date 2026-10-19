@@ -226,12 +226,17 @@ const GEN_TOPUP_MS = 12 * 60_000; // keep topping the message up after replying
 const GEN_MAX = 16; // inventory keeps up to 16 per type
 
 function genLines(entries, mode) {
-  return [...entries.values()].map(
-    (item) =>
-      `  • @${item.name}${
-        item.mode === mode ? '' : ` (${GEN_MODES[item.mode].label})`
-      } — ${item.freeOn.map((p) => RULES[p].label).join('+')}`
-  );
+  return [...entries.values()].map((item) => {
+    const plats = item.freeOn.map((p) => RULES[p].label).join('+');
+    // A name is served as soon as one platform confirms it; when Instagram
+    // then answers in the background, the line is upgraded in place
+    // ("TikTok" -> "TikTok+Instagram") - and if Instagram says it is TAKEN
+    // there, that is spelled out so the user is never misled.
+    const igNote = item.ig === TAKEN ? ' (محجوز على إنستا)' : '';
+    return `  • @${item.name}${
+      item.mode === mode ? '' : ` (${GEN_MODES[item.mode].label})`
+    } — ${plats}${igNote}`;
+  });
 }
 
 function genText(rows, mode, target, filling) {
@@ -275,6 +280,46 @@ async function topUp(ctx, messageId, rows, mode, target, platforms) {
     .catch(() => {});
 }
 
+/* Quietly confirm the names we actually served on Instagram.
+   The reply itself never waits for this: it goes out as soon as TikTok has
+   verified a name, and then each SERVED name (a handful - never the whole
+   inventory, so the owner's Instagram account is not hammered) is checked on
+   Instagram and its line updated in place: "— TikTok" becomes
+   "— TikTok+Instagram", or "(محجوز على إنستا)" when Instagram says it is
+   taken there. An Instagram "unknown" is left silent - no noise, no lies. */
+async function confirmInstagram(ctx, messageId, rows, mode, target) {
+  if (!stateOf(ctx.chat.id).platforms.includes('instagram')) return;
+  const deadline = Date.now() + GEN_TOPUP_MS;
+  let lastEdit = 0;
+  while (Date.now() < deadline) {
+    const item = [...rows.values()].find((i) => !i.ig && !i.freeOn.includes('instagram'));
+    if (!item) {
+      await new Promise((r) => setTimeout(r, 3000)); // new rows may still arrive
+      continue;
+    }
+    item.ig = 'busy'; // claim it so the next pass does not pick it twice
+    const res = await checkOn(item.name, ['instagram']).catch(() => ({}));
+    if (res?.instagram === FREE) {
+      item.freeOn = [...new Set([...item.freeOn, 'instagram'])];
+      item.ig = 'free';
+    } else {
+      item.ig = res?.instagram || UNKNOWN;
+    }
+    const now = Date.now();
+    if (now - lastEdit > 5000) {
+      lastEdit = now;
+      await ctx.api
+        .editMessageText(
+          ctx.chat.id,
+          messageId,
+          genText(rows, mode, target, rows.size < target),
+          { parse_mode: 'HTML' }
+        )
+        .catch(() => {});
+    }
+  }
+}
+
 async function runGen(ctx, mode, count) {
   const st = stateOf(ctx.chat.id);
   st.genMode = mode;
@@ -302,6 +347,7 @@ async function runGen(ctx, mode, count) {
   if (!rows.size) {
     const msg = await ctx.reply('⏳ بتأكّد أسماء جديدة دلوقتي — أول ما تتأكد هيوصلوا هنا.');
     topUp(ctx, msg.message_id, rows, mode, target, platforms).catch(() => {});
+    confirmInstagram(ctx, msg.message_id, rows, mode, target).catch(() => {});
     return;
   }
 
@@ -310,6 +356,7 @@ async function runGen(ctx, mode, count) {
     reply_markup: filling ? undefined : againKeyboard(mode),
   });
   topUp(ctx, msg.message_id, rows, mode, target, platforms).catch(() => {});
+  confirmInstagram(ctx, msg.message_id, rows, mode, target).catch(() => {});
 }
 
 async function runScanInner(ctx, base, limit) {
