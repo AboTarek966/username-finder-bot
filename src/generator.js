@@ -158,7 +158,10 @@ export function generateCandidates(count, opts = {}) {
 
   for (let i = 0; out.size < count && i < guard; i += 1) {
     const name = build(mode).replace(/[^a-zA-Z0-9._]/g, '').toLowerCase();
-    if (rule.validate(name)) out.add(name);
+    // Every generated name must carry a letter: Instagram refuses
+    // numeric-only handles outright, and a digit-only typo-shape is useless
+    // on TikTok too.
+    if (/[a-z]/.test(name) && rule.validate(name)) out.add(name);
   }
   return [...out].slice(0, count);
 }

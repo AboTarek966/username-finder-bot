@@ -17,7 +17,9 @@ import { generateCandidates, GEN_MODES } from './generator.js';
 import {
   checkOn,
   FREE,
+  TAKEN,
   ALL_PLATFORMS,
+  RULES,
   mapPool,
   platformCooldown,
 } from './checker.js';
@@ -167,6 +169,9 @@ function load() {
       if (
         i &&
         typeof i.name === 'string' &&
+        // A persisted name must still be a legal handle on some platform -
+        // kills any hand-edited or ancient junk before it can be served.
+        (RULES.tiktok.validate(i.name) || RULES.instagram.validate(i.name)) &&
         GEN_LADDER[i.mode] &&
         Array.isArray(i.freeOn) &&
         isFresh(i)

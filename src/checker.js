@@ -17,6 +17,20 @@ export const UNKNOWN = 'unknown';
 const CACHE_TTL = 6 * 60 * 60 * 1000; // 6 hours
 const cache = new Map(); // "platform:name" -> { status, at }
 
+/* The cache only grows in one direction (every checked name stays for its
+   TTL) - a 24/7 run would keep tens of thousands of entries alive, so expired
+   ones are dropped whenever the map gets big. */
+const CACHE_PRUNE_AT = 4000;
+let lastPrune = 0;
+function pruneCache() {
+  const now = Date.now();
+  if (cache.size < CACHE_PRUNE_AT || now - lastPrune < 5 * 60_000) return;
+  lastPrune = now;
+  for (const [key, hit] of cache) {
+    if (now - hit.at >= (hit.ttl || CACHE_TTL)) cache.delete(key);
+  }
+}
+
 /* Start checks a bit apart per platform: firing several at once is what
    triggers TikTok/Instagram rate limits (results come back as "unknown").
    The gap adapts to how the site is reacting: throttled -> back off,
@@ -96,6 +110,9 @@ export const RULES = {
     validate(name) {
       if (name.length < this.min || name.length > this.max) return false;
       if (!this.pattern.test(name)) return false;
+      // Instagram refuses numeric-only handles outright - a "free" answer for
+      // one would be a lie the user can never act on.
+      if (!/[a-zA-Z]/.test(name)) return false;
       if (name.startsWith('.') || name.endsWith('.')) return false;
       if (name.includes('..')) return false;
       return true;
@@ -721,6 +738,7 @@ async function screenTikTok(name) {
  * @returns {Promise<'free'|'taken'|'unknown'>}
  */
 export async function checkUsername(username, platform, opts = {}) {
+  pruneCache();
   const name = clean(username);
   const rule = RULES[platform];
   if (!rule) throw new Error(`Unknown platform: ${platform}`);

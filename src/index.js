@@ -52,6 +52,11 @@ const MAX_PER_GEN = 20;
 // Keep the check workers in step with the browser page pool (browser.js).
 const PARALLEL = Math.max(1, Number(process.env.CHECK_PARALLEL) || 4);
 
+/* User-typed text lands inside HTML messages - escape it, or a single "<"
+   from the keyboard turns the whole report into a Telegram parse error. */
+const esc = (s) =>
+  String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
 /** chatId -> { platforms: string[], awaiting: 'check'|'scan'|'deep'|null, genMode: string, genCount: number } */
 const chats = new Map();
 const WAITING = ['check', 'scan', 'deep'];
@@ -158,6 +163,13 @@ function parseHandles(raw) {
     .filter(Boolean);
 }
 
+/** "quad" أو "رباعي" — both spellings work in commands and free text. */
+function modeFrom(s) {
+  if (!s) return null;
+  const key = String(s).toLowerCase();
+  return MODE_KEYS.find((m) => m === key || GEN_MODES[m].label === key) || null;
+}
+
 /** Edits a status message at most every 2s to stay under Telegram limits. */
 function progressEditor(ctx, messageId) {
   let last = 0;
@@ -188,7 +200,7 @@ async function runCheckInner(ctx, names) {
       (p) => `  ${RULES[p].label}: ${emoji(res[p])} ${statusText(res[p])}`
     );
     const free = platforms.some((p) => res[p] === FREE);
-    return `${free ? '🎯 ' : ''}<b>@${name}</b>\n${parts.join('\n')}`;
+    return `${free ? '🎯 ' : ''}<b>@${esc(name)}</b>\n${parts.join('\n')}`;
   });
 
   const freeCount = rows.filter((r) => r.startsWith('🎯')).length;
@@ -376,7 +388,7 @@ async function runScanInner(ctx, base, limit) {
   if (!list.length) return ctx.reply('الاسم ده مش صالح كيوزر في المنصة دي.');
 
   const msg = await ctx.reply(
-    `🧩 ${list.length} صيغة لـ <b>${base}</b> على ${RULES[platform].label} ...`,
+    `🧩 ${list.length} صيغة لـ <b>${esc(base)}</b> على ${RULES[platform].label} ...`,
     { parse_mode: 'HTML' }
   );
   const update = progressEditor(ctx, msg.message_id);
@@ -399,7 +411,7 @@ async function runScanInner(ctx, base, limit) {
         .editMessageText(
           ctx.chat.id,
           msg.message_id,
-          `🧩 مافيش في الصيغ المباشرة — بيدوس أوسع حول <b>${base}</b> (${extra.length} تركيبة) ...`,
+          `🧩 مافيش في الصيغ المباشرة — بيدوس أوسع حول <b>${esc(base)}</b> (${extra.length} تركيبة) ...`,
           { parse_mode: 'HTML' }
         )
         .catch(() => {});
@@ -425,7 +437,7 @@ async function runScanInner(ctx, base, limit) {
     (unknownCount ? ` — ${unknownCount} مش مؤكدة (مخفية عمدًا) ⠶` : '');
   const body = freeOnes.length
     ? `🎯 <b>المتاحة فعلاً (مؤكدة بفحصين):</b>\n${freeOnes.join('\n')}`
-    : `لسه مالقيت صيغة متاحة حول <b>${base}</b> بعد ${rows.length} محاولة — الاسم ده شعبي جدًا.`;
+    : `لسه مالقيت صيغة متاحة حول <b>${esc(base)}</b> بعد ${rows.length} محاولة — الاسم ده شعبي جدًا.`;
   await ctx.api
     .editMessageText(ctx.chat.id, msg.message_id, body + stats, {
       parse_mode: 'HTML',
@@ -442,7 +454,7 @@ async function runDeepInner(ctx, base, mode) {
   const { platforms } = st;
   const labels = platforms.map((p) => RULES[p].label).join(' + ');
   const withBase = !!base && !['random', 'عشوائي', 'عشوائى'].includes(base.toLowerCase());
-  const scope = withBase ? `كلمة <b>${base}</b>` : `نوع <b>${GEN_MODES[mode].label}</b>`;
+  const scope = withBase ? `كلمة <b>${esc(base)}</b>` : `نوع <b>${GEN_MODES[mode].label}</b>`;
 
   const msg = await ctx.reply(
     `🔬 بحث عميق (${scope}) على ${labels}\n` +
@@ -467,7 +479,8 @@ async function runDeepInner(ctx, base, mode) {
           msg.message_id,
           `🔬 بحث عميق (${scope})\nبيفحص ${checked}/${total}` +
             `\n🎯 لقيت ${free} متاح لحد دلوقتي` +
-            (unknown ? ` | ⚠️ ${unknown} متأكدش` : '')
+            (unknown ? ` | ⚠️ ${unknown} متأكدش` : ''),
+          { parse_mode: 'HTML' }
         )
         .catch(() => {});
     },
@@ -582,13 +595,13 @@ bot.command('check', async (ctx) => {
 bot.command('gen', async (ctx) => {
   const args = ctx.match.trim().split(/\s+/).filter(Boolean);
   const count = Math.min(Math.max(Number(args[0]) || 8, 1), MAX_PER_GEN);
-  const mode = MODE_KEYS.includes(args[1]) ? args[1] : 'normal';
+  const mode = modeFrom(args[1]) || 'normal';
   await runGen(ctx, mode, count);
 });
 
 bot.command('deep', async (ctx) => {
   const args = ctx.match.trim().split(/\s+/).filter(Boolean);
-  const mode = MODE_KEYS.includes(args[1]) ? args[1] : stateOf(ctx.chat.id).genMode;
+  const mode = modeFrom(args[1]) || stateOf(ctx.chat.id).genMode;
   await runDeep(ctx, args[0] ? args[0].replace(/^@/, '') : null, mode);
 });
 
@@ -653,7 +666,7 @@ bot.on('message:text', async (ctx) => {
   if (st.awaiting === 'deep') {
     st.awaiting = null;
     const [word, maybeMode] = text.split(/\s+/);
-    const mode = MODE_KEYS.includes(maybeMode) ? maybeMode : st.genMode;
+    const mode = modeFrom(maybeMode) || st.genMode;
     return runDeep(ctx, word.replace(/^@/, ''), mode);
   }
 
