@@ -272,8 +272,14 @@ async function topUp(ctx, messageId, rows, mode, target, platforms) {
         .catch(() => {});
     }
   }
+  // Never end on a bare "0" (the user asked never to be told "nothing"): if
+  // the rare exact type could not fill in time, keep the status line honest
+  // and leave the retry button under it.
+  const doneText = rows.size
+    ? genText(rows, mode, target, false)
+    : `⏳ لسه بفتّش ${GEN_MODES[mode].label} — أي اسم جديد هيتأكد هيوصل هنا.`;
   await ctx.api
-    .editMessageText(ctx.chat.id, messageId, genText(rows, mode, target, false), {
+    .editMessageText(ctx.chat.id, messageId, doneText, {
       parse_mode: 'HTML',
       reply_markup: againKeyboard(mode),
     })

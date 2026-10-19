@@ -55,14 +55,15 @@ const demand = { platforms: [...ALL_PLATFORMS], priority: null };
 const isFresh = (i) => Date.now() - i.at < STALE_MS;
 const matchesDemand = (i) => i.freeOn.some((p) => demand.platforms.includes(p));
 
-/** Items usable for a request of `mode`: exact type first, then the ladder. */
+/* A request is answered ONLY by its exact type: pressing "ثلاثي" must hand
+   over three-character names, never the widened "شبه ثلاثي" cousins - the
+   ladder substitution is exactly what the user complained about ("choose
+   quad, get quasi4"). The ladder still widens what the FILLER searches for
+   in the background, but a widened name only ever answers its own button. */
 function eligible(mode) {
-  const ladder = GEN_LADDER[mode] || [mode];
   return pool
-    .filter((i) => isFresh(i) && matchesDemand(i) && ladder.includes(i.mode))
-    .sort(
-      (a, b) => ladder.indexOf(a.mode) - ladder.indexOf(b.mode) || b.at - a.at
-    );
+    .filter((i) => isFresh(i) && matchesDemand(i) && i.mode === mode)
+    .sort((a, b) => b.at - a.at); // newest first
 }
 
 const countFor = (mode) => eligible(mode).length;
@@ -87,6 +88,13 @@ function notify() {
 /** Resolve when `count` fresh names exist for `mode`, or after `timeoutMs`. */
 export function waitForInventory(mode, count, timeoutMs) {
   demand.priority = mode; // the filler works on THIS type first now
+  // A fresh press restarts the search on the EXACT type: the previous
+  // request's widening step must never answer this one.
+  const miss = misses.get(mode);
+  if (miss) {
+    miss.step = 0;
+    miss.checks = 0;
+  }
   if (countFor(mode) >= count) return Promise.resolve();
   return new Promise((resolve) => {
     const w = { mode, need: count, resolve, timer: null };
@@ -224,7 +232,10 @@ async function fillWave(mode) {
 
   const ladder = GEN_LADDER[mode] || [mode];
   const miss = misses.get(mode);
-  const step = Math.min(ladder.length - 1, miss.step);
+  // Somebody is waiting for THIS exact type right now -> never widen
+  // mid-request: the button must deliver what it promised. Widening stays a
+  // background/stock strategy for when nobody is waiting.
+  const step = demand.priority === mode ? 0 : Math.min(ladder.length - 1, miss.step);
   const waveMode = ladder[step];
 
   const wave = generateCandidates(WAVE, { platform, mode: waveMode });
