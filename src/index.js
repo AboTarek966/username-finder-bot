@@ -38,6 +38,8 @@ import {
   setDemand,
   holdInventory,
   releaseInventory,
+  setInventoryPaused,
+  isInventoryPaused,
 } from './inventory.js';
 import { closeBrowser, findBrowser } from './browser.js';
 
@@ -87,6 +89,7 @@ const HELP = [
   '🔬 <b>بحث عميق</b> — يدور بعمق على أي يوزر متاح فعلياً ويأكّده بفحصين',
   '🧩 <b>صيغ بديلة</b> — صيغ مختلفة لاسم أساسي (ahmad.x, theahmad...)',
   '⚙️ <b>المنصة</b> — تيكتوك بس / انستا بس / الاتنين',
+  '⏸ <b>إيقاف البحث</b> — يوقف البحث التلقائي عن يوزرات جديدة (و▶️ يرجّعه)',
   '❓ <b>مساعدة</b> — الرسالة دي',
   '',
   '<b>أنواع التوليد:</b>',
@@ -103,6 +106,8 @@ const HELP = [
   '',
   '✅ غير محجوز | ❌ محجوز | ⚠️ متأكدش (حظر مؤقت — جرّب تاني)',
   '',
+  'ℹ️ على انستا: «متاح» = مافيش حساب وخانة اسم المستخدم في التسجيل نفسها رفضتش الاسم (نفس اختبارك).',
+  '',
   '⚠️ النتيجة بتتخزن6 ساعات — راجع اليوزر بـ /check قبل ما تسجله.',
 ].join('\n');
 
@@ -118,6 +123,8 @@ function mainKeyboard() {
     .row()
     .text('⚙️ المنصة')
     .text('❓مساعدة')
+    .row()
+    .text(isInventoryPaused() ? '▶️ تشغيل البحث' : '⏸ إيقاف البحث')
     .resized();
 }
 
@@ -251,18 +258,27 @@ function genLines(entries, mode) {
   });
 }
 
-function genText(rows, mode, target, filling) {
+function genText(rows, mode, target, filling, paused = false) {
   const head = filling
     ? `🎯 <b>لقيت ${rows.size} من ${target} — الباقي في طريقه:</b>`
     : rows.size >= target
       ? `🎯 <b>تمام — ${target} يوزر متاح مؤكد:</b>`
       : `🎯 <b>${rows.size} يوزر متاح مؤكد (من ${target}):</b>`;
   const foot = filling
-    ? '\n\n⏳ كل اسم هنا متأكد بفحصين — والباقي هيتمضاف في نفس الرسالة دي.'
+    ? paused
+      ? '\n\n⏸ البحث متوقف مؤقتًا — دوس ▶️ تشغيل البحث وهنكمّل هنا.'
+      : '\n\n⏳ كل اسم هنا متأكد بفحصين — والباقي هيتمضاف في نفس الرسالة دي.'
     : rows.size >= target
       ? '\n\n✅ الكل متأكد بفحصين ومتاح فعليًا دلوقتي.'
-      : '\n\n⚠️ المنصات بتردّ ببطء (حظر مؤقت) — الباقي هيوصل في نفس الرسالة.';
-  return head + '\n' + genLines(rows, mode).join('\n') + foot;
+      : paused
+        ? '\n\n⏸ البحث متوقف — دوس ▶️ تشغيل البحث والباقي هيروح هنا.'
+        : '\n\n⚠️ المنصات بتردّ ببطء (حظر مؤقت) — الباقي هيوصل في نفس الرسالة.';
+  const note = filling
+    ? ''
+    : '\n\nℹ️ «متاح» على إنستا = مافيش حساب + خانة التسجيل نفسها قبلت الاسم' +
+      ' (نفس اللي بتغيّر بيه اسمك). وعلى تيكتوك = مافيش حساب على الاسم' +
+      ' — لو المنصة رفضت تغيير الاسم ده حفظ عندها مش حساب موجود.';
+  return head + '\n' + genLines(rows, mode).join('\n') + foot + note;
 }
 
 /* Grow the very same message until the requested count is on it. */
@@ -271,6 +287,22 @@ async function topUp(ctx, messageId, rows, mode, target, platforms) {
   let lastEdit = 0;
   while (rows.size < target && Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 2500));
+    // ⏸ paused: keep the line honest and WAIT for the resume - the names the
+    // user asked for still belong in this very message afterwards.
+    if (isInventoryPaused()) {
+      if (Date.now() - lastEdit > 5000) {
+        lastEdit = Date.now();
+        await ctx.api
+          .editMessageText(
+            ctx.chat.id,
+            messageId,
+            genText(rows, mode, target, rows.size < target, true),
+            { parse_mode: 'HTML' }
+          )
+          .catch(() => {});
+      }
+      continue;
+    }
     const more = takeFromInventory(mode, target - rows.size, platforms);
     if (!more.length) continue;
     for (const item of more) rows.set(item.name, item);
@@ -288,8 +320,10 @@ async function topUp(ctx, messageId, rows, mode, target, platforms) {
   // the rare exact type could not fill in time, keep the status line honest
   // and leave the retry button under it.
   const doneText = rows.size
-    ? genText(rows, mode, target, false)
-    : `⏳ لسه بفتّش ${GEN_MODES[mode].label} — أي اسم جديد هيتأكد هيوصل هنا.`;
+    ? genText(rows, mode, target, false, isInventoryPaused())
+    : isInventoryPaused()
+      ? `⏸ البحث متوقف — دوس ▶️ تشغيل البحث وهيوصل باقي ${GEN_MODES[mode].label} هنا.`
+      : `⏳ لسه بفتّش ${GEN_MODES[mode].label} — أي اسم جديد هيتأكد هيوصل هنا.`;
   await ctx.api
     .editMessageText(ctx.chat.id, messageId, doneText, {
       parse_mode: 'HTML',
@@ -310,6 +344,10 @@ async function confirmInstagram(ctx, messageId, rows, mode, target) {
   const deadline = Date.now() + GEN_TOPUP_MS;
   let lastEdit = 0;
   while (Date.now() < deadline) {
+    if (isInventoryPaused()) {
+      await new Promise((r) => setTimeout(r, 3000)); // ⏸: hold the IG checks too
+      continue;
+    }
     const item = [...rows.values()].find((i) => !i.ig && !i.freeOn.includes('instagram'));
     if (!item) {
       await new Promise((r) => setTimeout(r, 3000)); // new rows may still arrive
@@ -365,6 +403,13 @@ async function runGen(ctx, mode, count) {
   // "nothing found") and let the same message collect the names as they are
   // verified.
   if (!rows.size) {
+    // Paused (⏸): no stock and no background search - never claim otherwise.
+    if (isInventoryPaused()) {
+      await ctx.reply(
+        '⏸ البحث متوقف حاليًا ومافيش اسم جاهز دلوقتي — دوس ▶️ تشغيل البحث من القائمة وارجع تاني.'
+      );
+      return;
+    }
     const msg = await ctx.reply('⏳ بتأكّد أسماء جديدة دلوقتي — أول ما تتأكد هيوصلوا هنا.');
     topUp(ctx, msg.message_id, rows, mode, target, platforms).catch(() => {});
     confirmInstagram(ctx, msg.message_id, rows, mode, target).catch(() => {});
@@ -640,6 +685,19 @@ bot.on('message:text', async (ctx) => {
     case '🧩 صيغ بديلة':
       st.awaiting = 'scan';
       return showMenu(ctx, 'ابعتلي الاسم الأساسي زي <code>ahmad</code> وهجرب الصيغ اللي حواليه:');
+    case '⏸ إيقاف البحث':
+      setInventoryPaused(true);
+      return showMenu(
+        ctx,
+        '⏸ <b>وقّفت البحث في الخلفية</b> عن يوزرات جديدة.' +
+          '\nالمخزون الجاهز بيشتغل عادي، وأول ما تدوس <b>▶️ تشغيل البحث</b> هيرجع يبني من جديد.'
+      );
+    case '▶️ تشغيل البحث':
+      setInventoryPaused(false);
+      return showMenu(
+        ctx,
+        '▶️ <b>رجّعت البحث</b> في الخلفية — بيبدأ يبني مخزون جديد تاني تلقائيًا.'
+      );
     case '⚙️ المنصة':
       return ctx.reply('اختار المنصة اللي عايز تفحص عليها:', {
         reply_markup: platformKeyboard(ctx.chat.id),

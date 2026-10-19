@@ -76,6 +76,17 @@ const countFor = (mode) => eligible(mode).length;
 
 const waiters = [];
 
+/* ⏸/▶️ menu button: pause the BACKGROUND search. Already-verified stock keeps
+   being served; nothing new gets checked until the user resumes it. */
+let paused = false;
+export function setInventoryPaused(v) {
+  paused = !!v;
+  console.log(`[inventory] background search ${paused ? 'paused' : 'resumed'}`);
+}
+export function isInventoryPaused() {
+  return paused;
+}
+
 function notify() {
   for (let i = waiters.length - 1; i >= 0; i -= 1) {
     const w = waiters[i];
@@ -98,6 +109,7 @@ export function waitForInventory(mode, count, timeoutMs) {
     miss.checks = 0;
   }
   if (countFor(mode) >= count) return Promise.resolve();
+  if (paused) return Promise.resolve(); // ⏸ pressed: nothing is being searched
   return new Promise((resolve) => {
     const w = { mode, need: count, resolve, timer: null };
     w.timer = setTimeout(() => {
@@ -313,6 +325,13 @@ async function loop() {
     try {
       for (let i = pool.length - 1; i >= 0; i -= 1) {
         if (!isFresh(pool[i])) pool.splice(i, 1);
+      }
+
+      if (paused) {
+        // ⏸ pressed: keep the stock honest (stale sweep above) but check
+        // nothing new until the user presses ▶️ again.
+        await sleep(1500);
+        continue;
       }
 
       const work = pickWork();

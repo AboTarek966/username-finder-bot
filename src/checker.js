@@ -483,6 +483,76 @@ async function viaHttpInstagram(name) {
   return UNKNOWN;
 }
 
+/* Instagram's REAL availability answer lives in its signup box - the exact
+   field the user types into when changing their username. A reserved name
+   has no profile page yet Instagram still refuses to hand it out: proven
+   live ("9.u" answers "profile isn't available" on its page, but the box
+   says "غير متوفر"). So every FREE verdict has to survive this box: an
+   explicit refusal counts as taken (the user can never claim it), the box
+   saying nothing after a real typed check counts as free, and anything we
+   cannot read (wall / challenge / slow render) is UNKNOWN - fail closed,
+   never a wrong checkmark. Logged out on purpose: with a session cookie
+   Instagram bounces us away from the form. Runs only on the rare free
+   path, in its own page. */
+async function igSignupClaim(name) {
+  return withPage(async (page) => {
+    try {
+      await page
+        .goto('https://www.instagram.com/accounts/emailsignup/', {
+          waitUntil: 'domcontentloaded',
+          timeout: 30_000,
+        })
+        .catch(() => {});
+      const outcome = await page.evaluate(async (n) => {
+        const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+        const wall = (s) =>
+          /captcha|challenge|try later|\/accounts\/login|حاول لاحقًا|تم منع/i.test(s || '');
+        // The real form must render first (datacenter IPs sometimes get a wall).
+        let input = null;
+        for (let i = 0; i < 25 && !input; i += 1) {
+          input = [...document.querySelectorAll('input')].find(
+            (x) =>
+              x.type === 'search' ||
+              /user ?name|اسم المستخدم/i.test(x.getAttribute('aria-label') || '')
+          );
+          if (!input) await sleep(400);
+        }
+        const first = document.body ? document.body.innerText : '';
+        if (!input) return wall(first) ? 'walled' : 'no-form';
+        if (wall(first)) return 'walled';
+
+        input.focus();
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+        setter.call(input, n);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        await sleep(2500); // Instagram answers the box within ~2s of typing
+        input.blur();
+        input.dispatchEvent(new Event('blur', { bubbles: true }));
+        await sleep(2500);
+
+        const text = document.body ? document.body.innerText : '';
+        if (wall(text)) return 'walled';
+        // Read next to the field itself (where the message renders), like a
+        // human would, so unrelated page copy can never flip the verdict.
+        const at = text.search(/Username|اسم المستخدم/i);
+        const seg = at >= 0 ? text.slice(Math.max(0, at - 40), at + 300) : text.slice(0, 600);
+        if (
+          /(isn'?t available|not available|already (been )?(taken|used)|already exists|غير متوفر|محجوز|تم استخدامه)/i.test(seg)
+        ) {
+          return 'refused';
+        }
+        if (/(invalid|غير صالح|can'?t contain|يجب أن)/i.test(seg)) return 'refused';
+        return 'clear'; // real form + typed + waited + no refusal anywhere
+      }, name);
+      if (outcome === 'clear') return FREE;
+      if (outcome === 'refused') return TAKEN;
+      return UNKNOWN;
+    } catch {
+      return UNKNOWN;
+    }
+  });
+}
+
 /** DuckDuckGo html search: a hit proves the profile exists. */
 let searchNext = 0;
 async function viaSearchTikTok(name) {
@@ -815,6 +885,11 @@ export async function checkUsername(username, platform, opts = {}) {
   if (status === FREE && platform === 'instagram') {
     const cross = await viaHttpInstagram(name);
     if (cross === TAKEN) status = TAKEN;
+    // THE claim gate: no profile page is NOT a promise the user can act on -
+    // Instagram reserves usernames long after their page says "isn't
+    // available". Ask the signup box itself (the exact field the user types
+    // their new username into): only its silence counts as free.
+    if (status === FREE) status = await igSignupClaim(name);
   }
 
   /* ---------------------------------------------------------------- *
