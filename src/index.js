@@ -298,7 +298,9 @@ async function confirmInstagram(ctx, messageId, rows, mode, target) {
       continue;
     }
     item.ig = 'busy'; // claim it so the next pass does not pick it twice
-    const res = await checkOn(item.name, ['instagram']).catch(() => ({}));
+    // fresh:true - the label we are about to print must come from a brand-new
+    // verification, never from a cache entry another path left behind.
+    const res = await checkOn(item.name, ['instagram'], { fresh: true }).catch(() => ({}));
     if (res?.instagram === FREE) {
       item.freeOn = [...new Set([...item.freeOn, 'instagram'])];
       item.ig = 'free';

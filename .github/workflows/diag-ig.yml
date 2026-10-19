@@ -1,0 +1,35 @@
+# TEMPORARY: verify the Instagram verdict path from a real runner, then
+# delete this workflow and scripts/diag-ig.mjs.
+name: diag instagram truth
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install --omit=dev
+
+      - name: Run the diagnostic
+        env:
+          IG_SESSION: ${{ secrets.IG_SESSION }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          # Google Chrome is preinstalled on GitHub's Ubuntu runners.
+          BROWSER_PATH: /usr/bin/google-chrome
+          BROWSER_PAGES: '4'
+          CHECK_PARALLEL: '2'
+          BLOCK_RESOURCES: '2'
+        run: node scripts/diag-ig.mjs

@@ -163,7 +163,12 @@ function load() {
         Array.isArray(i.freeOn) &&
         isFresh(i)
       ) {
-        pool.push({ name: i.name, mode: i.mode, freeOn: i.freeOn, at: i.at });
+        // A platform claim is only honoured if THIS run earned it: old files
+        // may still carry Instagram claims produced by an earlier, weaker
+        // verification - never hand one out unverified (the pool is a
+        // 20-minute buffer anyway, nothing is lost by dropping them).
+        const freeOn = i.freeOn.filter((p) => p === 'tiktok');
+        if (freeOn.length) pool.push({ name: i.name, mode: i.mode, freeOn, at: i.at });
       }
     }
   } catch {
@@ -264,7 +269,15 @@ async function refreshOldest() {
   if (!platform || holds > 0 || !pool.length) return;
   const oldest = [...pool].sort((a, b) => a.at - b.at).slice(0, 2);
   for (const item of oldest) {
-    const res = await checkOn(item.name, [platform], { fresh: true, confirm: false });
+    // A renewed TikTok name already earned its double verification on the way
+    // into the pool. An Instagram claim on a TikTok item is NEW evidence, so
+    // it must survive the full reproduction pass - never one lucky read
+    // (a single unconfirmed "free" here once became a "TikTok+Instagram"
+    // label the user then found registered on Instagram).
+    const res = await checkOn(item.name, [platform], {
+      fresh: true,
+      confirm: platform !== 'instagram',
+    });
     const at = pool.indexOf(item);
     if (at < 0) continue;
     if (res[platform] === FREE) {
