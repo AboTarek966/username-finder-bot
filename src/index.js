@@ -143,16 +143,14 @@ function platformKeyboard(chatId) {
 
 function genModeKeyboard(count) {
   return new InlineKeyboard()
-    .text(`🎲 ${GEN_MODES.normal.label}`, 'gen:normal')
-    .text(`💎 ${GEN_MODES.premium.label}`, 'gen:premium')
+    .text(`🔁 ${GEN_MODES.normal.label} (مستمر)`, 'gen:continuous:normal')
+    .text(`🔁 ${GEN_MODES.premium.label} (مستمر)`, 'gen:continuous:premium')
     .row()
-    .text(`🔹 ${GEN_MODES.tri.label}`, 'gen:tri')
-    .text(`🔹 ${GEN_MODES.quad.label}`, 'gen:quad')
+    .text(`🔁 ${GEN_MODES.tri.label} (مستمر)`, 'gen:continuous:tri')
+    .text(`🔁 ${GEN_MODES.quad.label} (مستمر)`, 'gen:continuous:quad')
     .row()
-    .text(`✨ ${GEN_MODES.quasi3.label}`, 'gen:quasi3')
-    .text(`🔸 ${GEN_MODES.quasi4.label}`, 'gen:quasi4')
-    .row()
-    .text('🔁 <b>توليد مستمر</b> (لحد ما توقف)', 'gen:continuous:open')
+    .text(`🔁 ${GEN_MODES.quasi3.label} (مستمر)`, 'gen:continuous:quasi3')
+    .text(`🔁 ${GEN_MODES.quasi4.label} (مستمر)`, 'gen:continuous:quasi4')
     .row()
     .text(count === 6 ? '✅6 يوزرات' : '6 يوزرات', 'cnt:6')
     .text(count === 10 ? '✅10 يوزرات' : '10 يوزرات', 'cnt:10')
@@ -670,28 +668,6 @@ bot.callbackQuery('modes:open', async (ctx) => {
   await ctx
     .reply(`اختار نوع التوليد (عدد: ${st.genCount}):`, {
       reply_markup: genModeKeyboard(st.genCount),
-    })
-    .catch(() => {});
-});
-
-bot.callbackQuery('gen:continuous:open', async (ctx) => {
-  const st = stateOf(ctx.chat.id);
-  await ctx.answerCallbackQuery({ text: '🔁 وضع التوليد المستمر' }).catch(() => {});
-  const kb = new InlineKeyboard()
-    .text(`🔁 ${GEN_MODES.normal.label} (مستمر)`, 'gen:continuous:normal')
-    .text(`🔁 ${GEN_MODES.premium.label} (مستمر)`, 'gen:continuous:premium')
-    .row()
-    .text(`🔁 ${GEN_MODES.tri.label} (مستمر)`, 'gen:continuous:tri')
-    .text(`🔁 ${GEN_MODES.quad.label} (مستمر)`, 'gen:continuous:quad')
-    .row()
-    .text(`🔁 ${GEN_MODES.quasi3.label} (مستمر)`, 'gen:continuous:quasi3')
-    .text(`🔁 ${GEN_MODES.quasi4.label} (مستمر)`, 'gen:continuous:quasi4')
-    .row()
-    .text('⬅️ رجوع', 'modes:open');
-  await ctx
-    .reply('🔁 <b>اختر نوع التوليد المستمر:</b>\nبيفضل يولد أسماء ويضيفها للرسالة لحد ما تدوس ⏹ إيقاف', {
-      parse_mode: 'HTML',
-      reply_markup: kb,
     })
     .catch(() => {});
 });
