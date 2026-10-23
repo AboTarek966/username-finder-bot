@@ -25,11 +25,14 @@ import {
 } from './checker.js';
 
 const PARALLEL = Math.max(1, Number(process.env.CHECK_PARALLEL) || 4);
-const PER_MODE = 16; // keep up to this many fresh names per type
+const PER_MODE = 16; // keep up to this many fresh names per type (normal mode)
+const CONTINUOUS_PER_MODE = 200; // much higher cap for continuous mode
 const STALE_MS = 20 * 60_000; // a hit older than this is dropped and refilled
 const WIDEN_AFTER = 8; // checks without a hit -> try the next type
 const WAVE = Math.max(4, PARALLEL); // one batch: results stream in ~every 20s
+const CONTINUOUS_WAVE = 12; // bigger batches in continuous mode
 const IDLE_SLEEP = 15_000; // every type full: rest so we stop burning quota
+const CONTINUOUS_IDLE_SLEEP = 2_000; // almost no rest in continuous mode
 const SAVE_EVERY = 60_000;
 const DATA_FILE = process.env.INVENTORY_FILE || 'data/inventory.json';
 
@@ -85,6 +88,29 @@ export function setInventoryPaused(v) {
 }
 export function isInventoryPaused() {
   return paused;
+}
+
+/* 🔁 Continuous mode: per-chat unstoppable generation until user hits stop.
+   Each chat can have one active continuous session. */
+const continuousSessions = new Map(); // chatId -> { mode, platforms, stop: boolean }
+export function startContinuousMode(chatId, mode, platforms) {
+  continuousSessions.set(chatId, { mode, platforms, stop: false });
+  console.log(`[inventory] continuous mode START for chat ${chatId} mode=${mode}`);
+}
+export function stopContinuousMode(chatId) {
+  const s = continuousSessions.get(chatId);
+  if (s) {
+    s.stop = true;
+    continuousSessions.delete(chatId);
+    console.log(`[inventory] continuous mode STOP for chat ${chatId}`);
+  }
+}
+export function isContinuousModeActive(chatId) {
+  const s = continuousSessions.get(chatId);
+  return !!s && !s.stop;
+}
+export function getContinuousMode(chatId) {
+  return continuousSessions.get(chatId) || null;
 }
 
 function notify() {
@@ -220,13 +246,17 @@ export function releaseInventory() {
 }
 
 function pickWork() {
+  // Check if any chat has continuous mode active
+  const hasContinuous = continuousSessions.size > 0 && 
+    [...continuousSessions.values()].some(s => !s.stop);
+  const cap = hasContinuous ? CONTINUOUS_PER_MODE : PER_MODE;
   const order = [];
   if (demand.priority) order.push(demand.priority);
   for (let i = 0; i < MODES.length; i += 1) {
     const mode = MODES[(rr + i) % MODES.length];
     if (!order.includes(mode)) order.push(mode);
   }
-  const mode = order.find((m) => countFor(m) < PER_MODE);
+  const mode = order.find((m) => countFor(m) < cap);
   if (!mode) return null;
   rr = (MODES.indexOf(mode) + 1) % MODES.length;
   return { mode };
@@ -247,6 +277,9 @@ async function fillWave(mode) {
   const platform = activePlatform();
   if (!platform) return 0;
 
+  const hasContinuous = continuousSessions.size > 0 && 
+    [...continuousSessions.values()].some(s => !s.stop);
+  const waveSize = hasContinuous ? CONTINUOUS_WAVE : WAVE;
   const ladder = GEN_LADDER[mode] || [mode];
   const miss = misses.get(mode);
   // Somebody is waiting for THIS exact type right now -> never widen
@@ -255,7 +288,7 @@ async function fillWave(mode) {
   const step = demand.priority === mode ? 0 : Math.min(ladder.length - 1, miss.step);
   const waveMode = ladder[step];
 
-  const wave = generateCandidates(WAVE, { platform, mode: waveMode });
+  const wave = generateCandidates(waveSize, { platform, mode: waveMode });
 
   const t0 = Date.now();
   let gained = 0;
@@ -327,9 +360,12 @@ async function loop() {
         if (!isFresh(pool[i])) pool.splice(i, 1);
       }
 
-      if (paused) {
-        // ⏸ pressed: keep the stock honest (stale sweep above) but check
-        // nothing new until the user presses ▶️ again.
+      const hasContinuous = continuousSessions.size > 0 && 
+        [...continuousSessions.values()].some(s => !s.stop);
+
+      if (paused && !hasContinuous) {
+        // ⏸ pressed and no continuous mode: keep the stock honest (stale sweep above)
+        // but check nothing new until the user presses ▶️ again.
         await sleep(1500);
         continue;
       }
@@ -337,11 +373,11 @@ async function loop() {
       const work = pickWork();
       if (!work) {
         await refreshOldest(); // keep the stock honest while it is complete
-        await sleep(IDLE_SLEEP);
+        await sleep(hasContinuous ? CONTINUOUS_IDLE_SLEEP : IDLE_SLEEP);
         continue;
       }
       if (holds > 0 || activePlatform() === null) {
-        await sleep(1500);
+        await sleep(hasContinuous ? 500 : 1500);
         continue;
       }
       await fillWave(work.mode);

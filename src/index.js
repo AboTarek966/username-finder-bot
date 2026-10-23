@@ -40,6 +40,9 @@ import {
   releaseInventory,
   setInventoryPaused,
   isInventoryPaused,
+  startContinuousMode,
+  stopContinuousMode,
+  isContinuousModeActive,
 } from './inventory.js';
 import { closeBrowser, findBrowser } from './browser.js';
 
@@ -149,6 +152,8 @@ function genModeKeyboard(count) {
     .text(`✨ ${GEN_MODES.quasi3.label}`, 'gen:quasi3')
     .text(`🔸 ${GEN_MODES.quasi4.label}`, 'gen:quasi4')
     .row()
+    .text('🔁 <b>توليد مستمر</b> (لحد ما توقف)', 'gen:continuous:open')
+    .row()
     .text(count === 6 ? '✅6 يوزرات' : '6 يوزرات', 'cnt:6')
     .text(count === 10 ? '✅10 يوزرات' : '10 يوزرات', 'cnt:10')
     .text(count === 16 ? '✅16 يوزر' : '16 يوزر', 'cnt:16');
@@ -158,6 +163,14 @@ function genModeKeyboard(count) {
 function againKeyboard(mode) {
   return new InlineKeyboard()
     .text('🎲 توليد مرة أخرى', `gen:${mode}`)
+    .text('🔁 نوع توليد تاني', 'modes:open')
+    .row()
+    .text('🔬 بحث عميق بنفس النوع', `deep:${mode}`);
+}
+
+function continuousKeyboard(mode) {
+  return new InlineKeyboard()
+    .text('⏹ إيقاف التوليد المستمر', `gen:stop:${mode}`)
     .text('🔁 نوع توليد تاني', 'modes:open')
     .row()
     .text('🔬 بحث عميق بنفس النوع', `deep:${mode}`);
@@ -258,17 +271,21 @@ function genLines(entries, mode) {
   });
 }
 
-function genText(rows, mode, target, filling, paused = false) {
+function genText(rows, mode, target, filling, paused = false, continuous = false) {
   const head = filling
-    ? `🎯 <b>لقيت ${rows.size} من ${target} — الباقي في طريقه:</b>`
-    : rows.size >= target
+    ? `🎯 <b>لقيت ${rows.size} — الباقي في طريقه:</b>`
+    : rows.size >= target && !continuous
       ? `🎯 <b>تمام — ${target} يوزر متاح مؤكد:</b>`
-      : `🎯 <b>${rows.size} يوزر متاح مؤكد (من ${target}):</b>`;
+      : continuous
+        ? `🔁 <b>توليد مستمر — ${rows.size} يوزر متاح (اضغط ⏹ للإيقاف):</b>`
+        : `🎯 <b>${rows.size} يوزر متاح مؤكد (من ${target}):</b>`;
   const foot = filling
     ? paused
       ? '\n\n⏸ البحث متوقف مؤقتًا — دوس ▶️ تشغيل البحث وهنكمّل هنا.'
-      : '\n\n⏳ كل اسم هنا متأكد بفحصين — والباقي هيتمضاف في نفس الرسالة دي.'
-    : rows.size >= target
+      : continuous
+        ? '\n\n🔁 <b>الوضع المستمر شغال</b> — بيضيف أسماء بسرعة للرسالة دي. اضغط ⏹ <b>إيقاف</b> عشان تقفله.'
+        : '\n\n⏳ كل اسم هنا متأكد بفحصين — والباقي هيتمضاف في نفس الرسالة دي.'
+    : rows.size >= target && !continuous
       ? '\n\n✅ الكل متأكد بفحصين ومتاح فعليًا دلوقتي.'
       : paused
         ? '\n\n⏸ البحث متوقف — دوس ▶️ تشغيل البحث والباقي هيروح هنا.'
@@ -281,12 +298,20 @@ function genText(rows, mode, target, filling, paused = false) {
   return head + '\n' + genLines(rows, mode).join('\n') + foot + note;
 }
 
-/* Grow the very same message until the requested count is on it. */
-async function topUp(ctx, messageId, rows, mode, target, platforms) {
-  const deadline = Date.now() + GEN_TOPUP_MS;
+/* Grow the very same message until the requested count is on it (or forever in continuous mode). */
+async function topUp(ctx, messageId, rows, mode, target, platforms, continuous = false) {
+  const deadline = continuous ? Infinity : Date.now() + GEN_TOPUP_MS;
   let lastEdit = 0;
+  const pollInterval = continuous ? 800 : 2500; // much faster polling in continuous mode
+  
   while (rows.size < target && Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 2500));
+    await new Promise((r) => setTimeout(r, pollInterval));
+    
+    // Check if continuous mode was stopped
+    if (continuous && !isContinuousModeActive(ctx.chat.id)) {
+      break;
+    }
+    
     // ⏸ paused: keep the line honest and WAIT for the resume - the names the
     // user asked for still belong in this very message afterwards.
     if (isInventoryPaused()) {
@@ -296,26 +321,42 @@ async function topUp(ctx, messageId, rows, mode, target, platforms) {
           .editMessageText(
             ctx.chat.id,
             messageId,
-            genText(rows, mode, target, rows.size < target, true),
+            genText(rows, mode, target, rows.size < target, true, continuous),
             { parse_mode: 'HTML' }
           )
           .catch(() => {});
       }
       continue;
     }
-    const more = takeFromInventory(mode, target - rows.size, platforms);
+    const more = takeFromInventory(mode, continuous ? 50 : target - rows.size, platforms);
     if (!more.length) continue;
     for (const item of more) rows.set(item.name, item);
     const now = Date.now();
-    if (rows.size >= target || now - lastEdit > 5000) {
+    if (rows.size >= target || now - lastEdit > 3000) {
       lastEdit = now;
       await ctx.api
-        .editMessageText(ctx.chat.id, messageId, genText(rows, mode, target, rows.size < target), {
+        .editMessageText(ctx.chat.id, messageId, genText(rows, mode, target, rows.size < target, false, continuous), {
           parse_mode: 'HTML',
+          reply_markup: continuous ? continuousKeyboard(mode) : undefined,
         })
         .catch(() => {});
     }
   }
+  
+  // In continuous mode, don't add final keyboard - the continuous keyboard is already there
+  if (continuous) {
+    if (rows.size === 0) {
+      await ctx.api
+        .editMessageText(ctx.chat.id, messageId, 
+          `⏳ لسه بفتّش ${GEN_MODES[mode].label} — أي اسم جديد هيتأكد هيوصل هنا.`, {
+            parse_mode: 'HTML',
+            reply_markup: continuousKeyboard(mode),
+          })
+        .catch(() => {});
+    }
+    return;
+  }
+  
   // Never end on a bare "0" (the user asked never to be told "nothing"): if
   // the rare exact type could not fill in time, keep the status line honest
   // and leave the retry button under it.
@@ -378,22 +419,26 @@ async function confirmInstagram(ctx, messageId, rows, mode, target) {
   }
 }
 
-async function runGen(ctx, mode, count) {
+async function runGen(ctx, mode, count, continuous = false) {
   const st = stateOf(ctx.chat.id);
   st.genMode = mode;
   const { platforms } = st;
   setDemand(platforms);
-  const target = Math.max(1, Math.min(GEN_MAX, Number(count) || 8));
+  const target = continuous ? 999999 : Math.max(1, Math.min(GEN_MAX, Number(count) || 8));
+
+  if (continuous) {
+    startContinuousMode(ctx.chat.id, mode, platforms);
+  }
 
   // --- silent wait: never reply with a report when the user wants names --
-  await waitForInventory(mode, target, GEN_FIRST_WAIT);
-  let picked = takeFromInventory(mode, target, platforms);
+  await waitForInventory(mode, continuous ? 1 : target, GEN_FIRST_WAIT);
+  let picked = takeFromInventory(mode, continuous ? 1 : target, platforms);
   if (!picked.length) {
     // Nothing on hand at all (cold start): the user asked never to be told
     // "nothing found", so we stay silent until the first name is verified.
     // The status line below is the last resort for a full double outage.
     await waitForInventory(mode, 1, GEN_EMPTY_WAIT);
-    picked = takeFromInventory(mode, target, platforms);
+    picked = takeFromInventory(mode, continuous ? 1 : target, platforms);
   }
 
   const rows = new Map(picked.map((i) => [i.name, i]));
@@ -404,23 +449,23 @@ async function runGen(ctx, mode, count) {
   // verified.
   if (!rows.size) {
     // Paused (⏸): no stock and no background search - never claim otherwise.
-    if (isInventoryPaused()) {
+    if (isInventoryPaused() && !continuous) {
       await ctx.reply(
         '⏸ البحث متوقف حاليًا ومافيش اسم جاهز دلوقتي — دوس ▶️ تشغيل البحث من القائمة وارجع تاني.'
       );
       return;
     }
     const msg = await ctx.reply('⏳ بتأكّد أسماء جديدة دلوقتي — أول ما تتأكد هيوصلوا هنا.');
-    topUp(ctx, msg.message_id, rows, mode, target, platforms).catch(() => {});
+    topUp(ctx, msg.message_id, rows, mode, target, platforms, continuous).catch(() => {});
     confirmInstagram(ctx, msg.message_id, rows, mode, target).catch(() => {});
     return;
   }
 
-  const msg = await ctx.reply(genText(rows, mode, target, filling), {
+  const msg = await ctx.reply(genText(rows, mode, target, filling, false, continuous), {
     parse_mode: 'HTML',
-    reply_markup: filling ? undefined : againKeyboard(mode),
+    reply_markup: filling ? undefined : (continuous ? continuousKeyboard(mode) : againKeyboard(mode)),
   });
-  topUp(ctx, msg.message_id, rows, mode, target, platforms).catch(() => {});
+  topUp(ctx, msg.message_id, rows, mode, target, platforms, continuous).catch(() => {});
   confirmInstagram(ctx, msg.message_id, rows, mode, target).catch(() => {});
 }
 
@@ -595,6 +640,18 @@ bot.callbackQuery(/^gen:([a-z0-9]+)$/, async (ctx) => {
   await runGen(ctx, mode, count).catch((e) => console.error('gen error:', e));
 });
 
+bot.callbackQuery(/^gen:stop:([a-z0-9]+)$/, async (ctx) => {
+  const mode = ctx.match?.[1];
+  stopContinuousMode(ctx.chat.id);
+  await ctx.answerCallbackQuery({ text: '⏹ تم إيقاف التوليد المستمر' }).catch(() => {});
+  // Update the message to show it's stopped
+  await ctx.api
+    .editMessageReplyMarkup(ctx.chat.id, ctx.callbackQuery.message.message_id, {
+      reply_markup: againKeyboard(mode),
+    })
+    .catch(() => {});
+});
+
 bot.callbackQuery(/^cnt:(\d+)$/, async (ctx) => {
   const n = Math.min(Math.max(Number(ctx.match?.[1]) || 8, 1), MAX_PER_GEN);
   const st = stateOf(ctx.chat.id);
@@ -615,6 +672,34 @@ bot.callbackQuery('modes:open', async (ctx) => {
       reply_markup: genModeKeyboard(st.genCount),
     })
     .catch(() => {});
+});
+
+bot.callbackQuery('gen:continuous:open', async (ctx) => {
+  const st = stateOf(ctx.chat.id);
+  await ctx.answerCallbackQuery({ text: '🔁 وضع التوليد المستمر' }).catch(() => {});
+  const kb = new InlineKeyboard()
+    .text(`🔁 ${GEN_MODES.normal.label} (مستمر)`, 'gen:continuous:normal')
+    .text(`🔁 ${GEN_MODES.premium.label} (مستمر)`, 'gen:continuous:premium')
+    .row()
+    .text(`🔁 ${GEN_MODES.tri.label} (مستمر)`, 'gen:continuous:tri')
+    .text(`🔁 ${GEN_MODES.quad.label} (مستمر)`, 'gen:continuous:quad')
+    .row()
+    .text(`🔁 ${GEN_MODES.quasi3.label} (مستمر)`, 'gen:continuous:quasi3')
+    .text(`🔁 ${GEN_MODES.quasi4.label} (مستمر)`, 'gen:continuous:quasi4')
+    .row()
+    .text('⬅️ رجوع', 'modes:open');
+  await ctx
+    .reply('🔁 <b>اختر نوع التوليد المستمر:</b>\nبيفضل يولد أسماء ويضيفها للرسالة لحد ما تدوس ⏹ إيقاف', {
+      parse_mode: 'HTML',
+      reply_markup: kb,
+    })
+    .catch(() => {});
+});
+
+bot.callbackQuery(/^gen:continuous:([a-z0-9]+)$/, async (ctx) => {
+  const mode = GEN_MODES[ctx.match?.[1]] ? ctx.match[1] : 'normal';
+  await ctx.answerCallbackQuery({ text: `🔁 توليد ${GEN_MODES[mode].label} مستمر ✔️` }).catch(() => {});
+  await runGen(ctx, mode, 999999, true).catch((e) => console.error('continuous gen error:', e));
 });
 
 bot.callbackQuery('deep:again', async (ctx) => {
