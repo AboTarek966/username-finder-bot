@@ -35,8 +35,8 @@ const SEPARATORS = ['_', '.', 'x', ''];
 export const GEN_MODES = {
   normal: { label: 'عادي', desc: 'أسماء طويلة: كلمة + رقم (nova42, flame_orbit)' },
   quasi3: { label: 'شبه ثلاثي', desc: '4-5 أحرف: kr.1, ab12, z.x9' },
-  tri: { label: 'ثلاثي', desc: '3 أحرف بالظبط: kr1, a.b, zx9' },
-  quad: { label: 'رباعي', desc: '4 أحرف بالظبط: rh23, zx42, kr.x' },
+  tri: { label: 'ثلاثي', desc: '3 أحرف تمامًا: kr1, a.b, zx9' },
+  quad: { label: 'رباعي', desc: '4 أحرف تمامًا: rh23, zx42, kr.x' },
   quasi4: { label: 'شبه رباعي', desc: '5-6 أحرف: rh234, ab.xy, kr.12' },
   premium: { label: 'مميز', desc: 'حروف وأرقام مميزة: zx.99, kz.zk, 0xkq7' },
 };

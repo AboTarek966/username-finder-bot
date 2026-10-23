@@ -3,8 +3,6 @@
 //
 // Main menu (reply keyboard):
 //   🔍 فحص يوزر  🎲 توليد يوزر
-//   🔬 بحث عميق  🧩 صيغ بديلة
-//   ⚙️ المنصة     ❓مساعدة
 // Slash commands still work: /check /gen /scan /deep /platform /help
 
 import 'dotenv/config';
@@ -38,7 +36,6 @@ import {
   setDemand,
   holdInventory,
   releaseInventory,
-  setInventoryPaused,
   isInventoryPaused,
   startContinuousMode,
   stopContinuousMode,
@@ -53,7 +50,6 @@ if (!TOKEN) {
 }
 
 const MAX_PER_CHECK = 10;
-const MAX_PER_GEN = 20;
 // Keep the check workers in step with the browser page pool (browser.js).
 const PARALLEL = Math.max(1, Number(process.env.CHECK_PARALLEL) || 4);
 
@@ -62,12 +58,12 @@ const PARALLEL = Math.max(1, Number(process.env.CHECK_PARALLEL) || 4);
 const esc = (s) =>
   String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-/** chatId -> { platforms: string[], awaiting: 'check'|'scan'|'deep'|null, genMode: string, genCount: number } */
+/** chatId -> { platforms: string[], awaiting: 'check'|'scan'|'deep'|null, genMode: string } */
 const chats = new Map();
 const WAITING = ['check', 'scan', 'deep'];
 function stateOf(chatId) {
   if (!chats.has(chatId)) {
-    chats.set(chatId, { platforms: [...ALL_PLATFORMS], awaiting: null, genMode: 'normal', genCount: 8 });
+    chats.set(chatId, { platforms: [...ALL_PLATFORMS], awaiting: null, genMode: 'normal' });
   }
   const st = chats.get(chatId);
   // Sanitize: never keep a platform key we don't know about.
@@ -75,60 +71,43 @@ function stateOf(chatId) {
   st.platforms = valid.length ? [...new Set(valid)] : [...ALL_PLATFORMS];
   st.awaiting = WAITING.includes(st.awaiting) ? st.awaiting : null;
   if (!MODE_KEYS.includes(st.genMode)) st.genMode = 'normal';
-  if (!Number.isFinite(st.genCount) || st.genCount < 1 || st.genCount > MAX_PER_GEN) {
-    st.genCount = 8;
-  }
   return st;
 }
 
 const bot = new Bot(TOKEN);
 
 const HELP = [
-  '<b>🔎 بوت البحث عن يوزرات غير محجوزة</b> (تيكتوك + انستا)',
+  '<b>🔎 بوت البحث عن يوزرات غير محجوزة</b> (تيكتوك + إنستا)',
   '',
-  '<b>استخدم الأزرار القائمة تحت:</b>',
-  '🔍 <b>فحص يوزر</b> — تكتب الأسماء وهو يفحصها',
-  '🎲 <b>توليد يوزر</b> — يولّد ويقولك أنهيهم متاحين',
-  '🔬 <b>بحث عميق</b> — يدور بعمق على أي يوزر متاح فعلياً ويأكّده بفحصين',
-  '🧩 <b>صيغ بديلة</b> — صيغ مختلفة لاسم أساسي (ahmad.x, theahmad...)',
-  '⚙️ <b>المنصة</b> — تيكتوك بس / انستا بس / الاتنين',
-  '⏸ <b>إيقاف البحث</b> — يوقف البحث التلقائي عن يوزرات جديدة (و▶️ يرجّعه)',
-  '❓ <b>مساعدة</b> — الرسالة دي',
+  '<b>استخدم الزرين التاليين:</b>',
+  '🔍 <b>فحص يوزر</b> — أرسل الأسماء ليتم فحصها',
+  '🎲 <b>توليد يوزر</b> — يولّد أسماء باستمرار ويبيّن المتاح منها',
   '',
   '<b>أنواع التوليد:</b>',
   'عادي (nova42) • مميز (the.nova.official)',
   'ثلاثي (kr1, a.b) • رباعي (rh23, zx42)',
   'شبه ثلاثي (kr.1, ab12) • شبه رباعي (rh234, ab.xy)',
   '',
-  '<b>أوامر مكتوبة (اختياري):</b>',
-  '/check &lt;user1&gt; [user2] — فحص أسماء (حد أقصى10)',
-  '/gen [العدد] [النوع] — توليد وفحص (حد أقصى20)',
-  '/deep [كلمة] [النوع] — بحث عميق يعرض المتاح المؤكد بس',
+  '🔁 يستمر التوليد تلقائيًا حتى تضغط <b>⏹ إيقاف</b> تحت الرسالة.',
+  '',
+  '<b>أوامر مكتوبة (اختيارية):</b>',
+  '/check &lt;user1&gt; [user2] — فحص أسماء (حد أقصى 10)',
+  '/gen [النوع] — توليد مستمر (يتوقف بـ ⏹ فقط)',
+  '/deep [كلمة] [النوع] — بحث عميق يعرض المتاح المؤكد فقط',
   '/scan &lt;الاسم&gt; [العدد] — صيغ بديلة',
   '/platform — اختيار المنصة',
   '',
-  '✅ غير محجوز | ❌ محجوز | ⚠️ متأكدش (حظر مؤقت — جرّب تاني)',
+  '✅ غير محجوز | ❌ محجوز | ⚠️ غير مؤكد (حظر مؤقت — أعد المحاولة لاحقًا)',
   '',
-  'ℹ️ على انستا: «متاح» = مافيش حساب وخانة اسم المستخدم في التسجيل نفسها رفضتش الاسم (نفس اختبارك).',
+  'ℹ️ على إنستا: «متاح» = لا يوجد حساب وخانة اسم المستخدم في التسجيل نفسها رفضت الاسم (نفس اختبارك).',
   '',
-  '⚠️ النتيجة بتتخزن6 ساعات — راجع اليوزر بـ /check قبل ما تسجله.',
+  '⚠️ النتيجة تُحفظ لمدة 6 ساعات — راجع اليوزر بـ /check قبل تسجيله.',
 ].join('\n');
 
 /* ------------------------------ keyboards ------------------------------ */
 
 function mainKeyboard() {
-  return new Keyboard()
-    .text('🔍 فحص يوزر')
-    .text('🎲 توليد يوزر')
-    .row()
-    .text('🔬 بحث عميق')
-    .text('🧩 صيغ بديلة')
-    .row()
-    .text('⚙️ المنصة')
-    .text('❓مساعدة')
-    .row()
-    .text(isInventoryPaused() ? '▶️ تشغيل البحث' : '⏸ إيقاف البحث')
-    .resized();
+  return new Keyboard().text('🔍 فحص يوزر').text('🎲 توليد يوزر').resized();
 }
 
 function platformKeyboard(chatId) {
@@ -141,7 +120,7 @@ function platformKeyboard(chatId) {
     .text('الاتنين', 'pf:both');
 }
 
-function genModeKeyboard(count) {
+function genModeKeyboard() {
   return new InlineKeyboard()
     .text(`🔁 ${GEN_MODES.normal.label} (مستمر)`, 'gen:continuous:normal')
     .text(`🔁 ${GEN_MODES.premium.label} (مستمر)`, 'gen:continuous:premium')
@@ -150,18 +129,14 @@ function genModeKeyboard(count) {
     .text(`🔁 ${GEN_MODES.quad.label} (مستمر)`, 'gen:continuous:quad')
     .row()
     .text(`🔁 ${GEN_MODES.quasi3.label} (مستمر)`, 'gen:continuous:quasi3')
-    .text(`🔁 ${GEN_MODES.quasi4.label} (مستمر)`, 'gen:continuous:quasi4')
-    .row()
-    .text(count === 6 ? '✅6 يوزرات' : '6 يوزرات', 'cnt:6')
-    .text(count === 10 ? '✅10 يوزرات' : '10 يوزرات', 'cnt:10')
-    .text(count === 16 ? '✅16 يوزر' : '16 يوزر', 'cnt:16');
+    .text(`🔁 ${GEN_MODES.quasi4.label} (مستمر)`, 'gen:continuous:quasi4');
 }
 
 /** Buttons under a finished batch: repeat it or pick another style. */
 function againKeyboard(mode) {
   return new InlineKeyboard()
-    .text('🎲 توليد مرة أخرى', `gen:${mode}`)
-    .text('🔁 نوع توليد تاني', 'modes:open')
+    .text('🔁 توليد مرة أخرى', `gen:continuous:${mode}`)
+    .text('🔁 نوع توليد آخر', 'modes:open')
     .row()
     .text('🔬 بحث عميق بنفس النوع', `deep:${mode}`);
 }
@@ -169,7 +144,7 @@ function againKeyboard(mode) {
 function continuousKeyboard(mode) {
   return new InlineKeyboard()
     .text('⏹ إيقاف التوليد المستمر', `gen:stop:${mode}`)
-    .text('🔁 نوع توليد تاني', 'modes:open')
+    .text('🔁 نوع توليد آخر', 'modes:open')
     .row()
     .text('🔬 بحث عميق بنفس النوع', `deep:${mode}`);
 }
@@ -191,7 +166,7 @@ function modeFrom(s) {
 /** Edits a status message at most every 2s to stay under Telegram limits. */
 function progressEditor(ctx, messageId) {
   let last = 0;
-  return async (done, total, note = 'بيفحص') => {
+  return async (done, total, note = 'يفحص') => {
     const now = Date.now();
     if (now - last < 2000 && done < total) return;
     last = now;
@@ -224,7 +199,7 @@ async function runCheckInner(ctx, names) {
   const freeCount = rows.filter((r) => r.startsWith('🎯')).length;
   const footer = freeCount
     ? `\n\n🎯 يوزرات متاحة (مؤكدة بفحصين): ${freeCount}`
-    : '\n\nمفيش يوزرات متاحة في القائمة دي.';
+    : '\n\nلا توجد يوزرات متاحة في هذه القائمة.';
   await ctx.api
     .editMessageText(ctx.chat.id, msg.message_id, rows.join('\n\n') + footer, {
       parse_mode: 'HTML',
@@ -271,28 +246,28 @@ function genLines(entries, mode) {
 
 function genText(rows, mode, target, filling, paused = false, continuous = false) {
   const head = filling
-    ? `🎯 <b>لقيت ${rows.size} — الباقي في طريقه:</b>`
+    ? `🎯 <b>وجد ${rows.size} — الباقي في طريقه:</b>`
     : rows.size >= target && !continuous
-      ? `🎯 <b>تمام — ${target} يوزر متاح مؤكد:</b>`
+      ? `🎯 <b>تم العثور على ${target} يوزرات متاحة مؤكدة:</b>`
       : continuous
         ? `🔁 <b>توليد مستمر — ${rows.size} يوزر متاح (اضغط ⏹ للإيقاف):</b>`
         : `🎯 <b>${rows.size} يوزر متاح مؤكد (من ${target}):</b>`;
   const foot = filling
     ? paused
-      ? '\n\n⏸ البحث متوقف مؤقتًا — دوس ▶️ تشغيل البحث وهنكمّل هنا.'
+      ? '\n\n⏸ البحث متوقف مؤقتًا — اضغط ▶️ تشغيل البحث وسنواصل هنا.'
       : continuous
-        ? '\n\n🔁 <b>الوضع المستمر شغال</b> — بيضيف أسماء بسرعة للرسالة دي. اضغط ⏹ <b>إيقاف</b> عشان تقفله.'
-        : '\n\n⏳ كل اسم هنا متأكد بفحصين — والباقي هيتمضاف في نفس الرسالة دي.'
+        ? '\n\n🔁 <b>الوضع المستمر يعمل</b> — يضيف أسماء بسرعة للرسالة. اضغط ⏹ <b>إيقاف</b> لتوقيفه.'
+        : '\n\n⏳ كل اسم هنا مؤكد بفحصين — والباقي سيضاف في نفس الرسالة.'
     : rows.size >= target && !continuous
-      ? '\n\n✅ الكل متأكد بفحصين ومتاح فعليًا دلوقتي.'
+      ? '\n\n✅ الكل مؤكد بفحصين ومتاح فعليًا الآن.'
       : paused
-        ? '\n\n⏸ البحث متوقف — دوس ▶️ تشغيل البحث والباقي هيروح هنا.'
-        : '\n\n⚠️ المنصات بتردّ ببطء (حظر مؤقت) — الباقي هيوصل في نفس الرسالة.';
+        ? '\n\n⏸ البحث متوقف — اضغط ▶️ تشغيل البحث وسيصل الباقي هنا.'
+        : '\n\n⚠️ المنصات ترد ببطء (حظر مؤقت) — الباقي سيصل في نفس الرسالة.';
   const note = filling
     ? ''
-    : '\n\nℹ️ «متاح» على إنستا = مافيش حساب + خانة التسجيل نفسها قبلت الاسم' +
-      ' (نفس اللي بتغيّر بيه اسمك). وعلى تيكتوك = مافيش حساب على الاسم' +
-      ' — لو المنصة رفضت تغيير الاسم ده حفظ عندها مش حساب موجود.';
+    : '\n\nℹ️ «متاح» على إنستا = لا يوجد حساب + خانة التسجيل قبلت الاسم' +
+      ' (نفس التي تغير بها اسمك). وعلى تيكتوك = لا يوجد حساب على الاسم' +
+      ' — إن رفضت المنصة تغيير الاسم فهذا احتفاظ لديها لا حساب موجود.';
   return head + '\n' + genLines(rows, mode).join('\n') + foot + note;
 }
 
@@ -346,7 +321,7 @@ async function topUp(ctx, messageId, rows, mode, target, platforms, continuous =
     if (rows.size === 0) {
       await ctx.api
         .editMessageText(ctx.chat.id, messageId, 
-          `⏳ لسه بفتّش ${GEN_MODES[mode].label} — أي اسم جديد هيتأكد هيوصل هنا.`, {
+          `⏳ لا يزال البحث جاريًا عن ${GEN_MODES[mode].label} — أي اسم جديد مؤكد سيصل هنا.`, {
             parse_mode: 'HTML',
             reply_markup: continuousKeyboard(mode),
           })
@@ -361,8 +336,8 @@ async function topUp(ctx, messageId, rows, mode, target, platforms, continuous =
   const doneText = rows.size
     ? genText(rows, mode, target, false, isInventoryPaused())
     : isInventoryPaused()
-      ? `⏸ البحث متوقف — دوس ▶️ تشغيل البحث وهيوصل باقي ${GEN_MODES[mode].label} هنا.`
-      : `⏳ لسه بفتّش ${GEN_MODES[mode].label} — أي اسم جديد هيتأكد هيوصل هنا.`;
+      ? `⏸ البحث متوقف — اضغط ▶️ تشغيل البحث وسيصل باقي ${GEN_MODES[mode].label} هنا.`
+      : `⏳ لا يزال البحث جاريًا عن ${GEN_MODES[mode].label} — أي اسم جديد مؤكد سيصل هنا.`;
   await ctx.api
     .editMessageText(ctx.chat.id, messageId, doneText, {
       parse_mode: 'HTML',
@@ -449,11 +424,11 @@ async function runGen(ctx, mode, count, continuous = false) {
     // Paused (⏸): no stock and no background search - never claim otherwise.
     if (isInventoryPaused() && !continuous) {
       await ctx.reply(
-        '⏸ البحث متوقف حاليًا ومافيش اسم جاهز دلوقتي — دوس ▶️ تشغيل البحث من القائمة وارجع تاني.'
+        '⏸ البحث متوقف حاليًا ولا يوجد اسم جاهز الآن — اضغط ▶️ تشغيل البحث من القائمة وحاول مجددًا.'
       );
       return;
     }
-    const msg = await ctx.reply('⏳ بتأكّد أسماء جديدة دلوقتي — أول ما تتأكد هيوصلوا هنا.');
+    const msg = await ctx.reply('⏳ جارٍ التحقق من أسماء جديدة — فور توفرها ستصل هنا.');
     topUp(ctx, msg.message_id, rows, mode, target, platforms, continuous).catch(() => {});
     confirmInstagram(ctx, msg.message_id, rows, mode, target).catch(() => {});
     return;
@@ -473,7 +448,7 @@ async function runScanInner(ctx, base, limit) {
   const platform = platforms[0];
 
   const list = variations(base, { platform, limit });
-  if (!list.length) return ctx.reply('الاسم ده مش صالح كيوزر في المنصة دي.');
+  if (!list.length) return ctx.reply('هذا الاسم غير صالح كيوزر في هذه المنصة.');
 
   const msg = await ctx.reply(
     `🧩 ${list.length} صيغة لـ <b>${esc(base)}</b> على ${RULES[platform].label} ...`,
@@ -483,7 +458,7 @@ async function runScanInner(ctx, base, limit) {
 
   const rows = await mapPool(list, PARALLEL, async (name, i) => {
     const status = await checkUsername(name, platform);
-    await update(i + 1, list.length, 'بيجرب');
+    await update(i + 1, list.length, 'يجرب');
     return { name, status };
   });
 
@@ -499,13 +474,13 @@ async function runScanInner(ctx, base, limit) {
         .editMessageText(
           ctx.chat.id,
           msg.message_id,
-          `🧩 مافيش في الصيغ المباشرة — بيدوس أوسع حول <b>${esc(base)}</b> (${extra.length} تركيبة) ...`,
+          `🧩 لا توجد في الصيغ المباشرة — يبحث أوسع حول <b>${esc(base)}</b> (${extra.length} تركيبة) ...`,
           { parse_mode: 'HTML' }
         )
         .catch(() => {});
       const more = await mapPool(extra, PARALLEL, async (name, i) => {
         const status = await checkUsername(name, platform);
-        await update(i + 1, extra.length, 'بيركّب تركيبات');
+        await update(i + 1, extra.length, 'يركب تركيبات');
         return { name, status };
       });
       rows.push(...more);
@@ -525,7 +500,7 @@ async function runScanInner(ctx, base, limit) {
     (unknownCount ? ` — ${unknownCount} مش مؤكدة (مخفية عمدًا) ⠶` : '');
   const body = freeOnes.length
     ? `🎯 <b>المتاحة فعلاً (مؤكدة بفحصين):</b>\n${freeOnes.join('\n')}`
-    : `لسه مالقيت صيغة متاحة حول <b>${esc(base)}</b> بعد ${rows.length} محاولة — الاسم ده شعبي جدًا.`;
+    : `لم يُعثر على صيغة متاحة حول <b>${esc(base)}</b> بعد ${rows.length} محاولة — الاسم مطلوب جدًا.`;
   await ctx.api
     .editMessageText(ctx.chat.id, msg.message_id, body + stats, {
       parse_mode: 'HTML',
@@ -546,7 +521,7 @@ async function runDeepInner(ctx, base, mode) {
 
   const msg = await ctx.reply(
     `🔬 بحث عميق (${scope}) على ${labels}\n` +
-      'هفحص دفعة كبيرة وأعرض المتاح <b>المؤكد</b> بس (فحصين لكل اسم)...',
+      'سيفحص دفعة كبيرة ويعرض المتاح <b>المؤكد</b> فقط (فحصين لكل اسم)...',
     { parse_mode: 'HTML' }
   );
 
@@ -565,9 +540,9 @@ async function runDeepInner(ctx, base, mode) {
         .editMessageText(
           ctx.chat.id,
           msg.message_id,
-          `🔬 بحث عميق (${scope})\nبيفحص ${checked}/${total}` +
-            `\n🎯 لقيت ${free} متاح لحد دلوقتي` +
-            (unknown ? ` | ⚠️ ${unknown} متأكدش` : ''),
+          `🔬 بحث عميق (${scope})\nيفحص ${checked}/${total}` +
+            `\n🎯 وجد ${free} متاح حتى الآن` +
+            (unknown ? ` | ⚠️ ${unknown} غير مؤكد` : ''),
           { parse_mode: 'HTML' }
         )
         .catch(() => {});
@@ -582,13 +557,13 @@ async function runDeepInner(ctx, base, mode) {
   );
   const header =
     `🔬 <b>بحث عميق</b> (${scope}) — فحصت <b>${result.checked}</b> يوزر` +
-    (result.stoppedEarly ? ' ووقفت بعد ما لقيت الكفاية ✅' : '');
+    (result.stoppedEarly ? ' وتوقفت بعد إيجاد القدر الكافي ✅' : '');
   const body = lines.length
     ? lines.join('\n\n')
-    : 'مفيش يوزر متاح مؤكد في الدفعة دي — جرّب كلمة/نوع تاني أو ارجع اضغط 🔬 تاني بعد شوية.';
+    : 'لا يوجد يوزر متاح مؤكد في هذه الدفعة — جرّب كلمة/نوع آخر أو أعد الضغط على 🔬 بعد قليل.';
   const note =
-    `\n\n💡 <b>مهم:</b> كل اسم ده اتأكد منه مرتين (فحص تاني من غير كاش).` +
-    `\nسجّل بسرعة قبل ما حد ياخدو، وراجعه بـ /check قبل التسجيل.` +
+    `\n\n💡 <b>مهم:</b> كل اسم تم تأكيده مرتين (فحص ثانٍ بدون كاش).` +
+    `\nسارع بالتسجيل قبل أن يأخذه غيرك، وراجعه بـ /check قبل التسجيل.` +
     worstCaseNote(result.unknown);
 
   st.lastDeep = { base: withBase ? base : null, mode };
@@ -596,7 +571,7 @@ async function runDeepInner(ctx, base, mode) {
     .editMessageText(ctx.chat.id, msg.message_id, `${header}\n\n${body}${note}`, {
       parse_mode: 'HTML',
       reply_markup: new InlineKeyboard()
-        .text('🔬 بحث تاني بنفس الكلمة', 'deep:again')
+        .text('🔬 إعادة البحث بنفس الكلمة', 'deep:again')
         .text('🎲 توليد يوزرات', 'modes:open'),
     })
     .catch(() => {});
@@ -612,7 +587,7 @@ bot.command('start', (ctx) => showMenu(ctx, HELP));
 bot.command('help', (ctx) => showMenu(ctx, HELP));
 
 bot.command('platform', (ctx) =>
-  ctx.reply('اختار المنصة اللي عايز تفحص عليها:', {
+  ctx.reply('اختر المنصة المراد الفحص عليها:', {
     reply_markup: platformKeyboard(ctx.chat.id),
   })
 );
@@ -622,10 +597,10 @@ bot.callbackQuery(/^pf:(tiktok|instagram|both)$/, async (ctx) => {
   const arg = ctx.match?.[1] || ctx.callbackQuery.data.split(':')[1];
   const st = stateOf(ctx.chat.id);
   st.platforms = arg === 'both' ? [...ALL_PLATFORMS] : [arg];
-  await ctx.answerCallbackQuery({ text: 'تمام، اتحفظ ✔️' });
+  await ctx.answerCallbackQuery({ text: 'تم الحفظ ✔️' });
   // Same text/keyboard = Telegram returns "message is not modified"; ignore it.
   await ctx
-    .editMessageText('اختار المنصة اللي عايز تفحص عليها:', {
+    .editMessageText('اختر المنصة المراد الفحص عليها:', {
       reply_markup: platformKeyboard(ctx.chat.id),
     })
     .catch(() => {});
@@ -634,8 +609,9 @@ bot.callbackQuery(/^pf:(tiktok|instagram|both)$/, async (ctx) => {
 bot.callbackQuery(/^gen:([a-z0-9]+)$/, async (ctx) => {
   const mode = GEN_MODES[ctx.match?.[1]] ? ctx.match[1] : 'normal';
   await ctx.answerCallbackQuery({ text: `توليد ${GEN_MODES[mode].label} ✔️` }).catch(() => {});
-  const count = stateOf(ctx.chat.id).genCount;
-  await runGen(ctx, mode, count).catch((e) => console.error('gen error:', e));
+  // Old messages still carry non-continuous buttons: honour them the same way
+  // as the current menu - run until the user presses ⏹.
+  await runGen(ctx, mode, 999999, true).catch((e) => console.error('gen error:', e));
 });
 
 bot.callbackQuery(/^gen:stop:([a-z0-9]+)$/, async (ctx) => {
@@ -650,24 +626,11 @@ bot.callbackQuery(/^gen:stop:([a-z0-9]+)$/, async (ctx) => {
     .catch(() => {});
 });
 
-bot.callbackQuery(/^cnt:(\d+)$/, async (ctx) => {
-  const n = Math.min(Math.max(Number(ctx.match?.[1]) || 8, 1), MAX_PER_GEN);
-  const st = stateOf(ctx.chat.id);
-  st.genCount = n;
-  await ctx.answerCallbackQuery({ text: `العدد بقى ${n} يوزرات ✔️` }).catch(() => {});
-  await ctx
-    .editMessageText(`اختار نوع التوليد (عدد: ${st.genCount}):`, {
-      reply_markup: genModeKeyboard(st.genCount),
-    })
-    .catch(() => {});
-});
-
 bot.callbackQuery('modes:open', async (ctx) => {
-  const st = stateOf(ctx.chat.id);
-  await ctx.answerCallbackQuery({ text: 'اختار النوع 👇' }).catch(() => {});
+  await ctx.answerCallbackQuery({ text: 'اختر النوع 👇' }).catch(() => {});
   await ctx
-    .reply(`اختار نوع التوليد (عدد: ${st.genCount}):`, {
-      reply_markup: genModeKeyboard(st.genCount),
+    .reply('اختر نوع التوليد:', {
+      reply_markup: genModeKeyboard(),
     })
     .catch(() => {});
 });
@@ -680,7 +643,7 @@ bot.callbackQuery(/^gen:continuous:([a-z0-9]+)$/, async (ctx) => {
 
 bot.callbackQuery('deep:again', async (ctx) => {
   const st = stateOf(ctx.chat.id);
-  await ctx.answerCallbackQuery({ text: 'بحث عميق تاني 🔬' }).catch(() => {});
+  await ctx.answerCallbackQuery({ text: 'بحث عميق آخر 🔬' }).catch(() => {});
   const last = st.lastDeep || { base: null, mode: st.genMode };
   await runDeep(ctx, last.base, last.mode).catch((e) => console.error('deep error:', e));
 });
@@ -700,9 +663,9 @@ bot.command('check', async (ctx) => {
 
 bot.command('gen', async (ctx) => {
   const args = ctx.match.trim().split(/\s+/).filter(Boolean);
-  const count = Math.min(Math.max(Number(args[0]) || 8, 1), MAX_PER_GEN);
-  const mode = modeFrom(args[1]) || 'normal';
-  await runGen(ctx, mode, count);
+  // Continuous by default: it never stops on its own, only via ⏹ under the message.
+  const mode = modeFrom(args[0]) || modeFrom(args[1]) || 'normal';
+  await runGen(ctx, mode, 999999, true).catch((e) => console.error('gen error:', e));
 });
 
 bot.command('deep', async (ctx) => {
@@ -713,7 +676,7 @@ bot.command('deep', async (ctx) => {
 
 bot.command('scan', async (ctx) => {
   const args = ctx.match.trim().split(/\s+/).filter(Boolean);
-  if (!args[0]) return showMenu(ctx, 'الاستخدام: <code>/scan ahmad 10</code>\nأو اضغط 🧩 صيغ بديلة من القائمة.');
+  if (!args[0]) return showMenu(ctx, 'الاستخدام: <code>/scan ahmad 10</code>');
   const limit = Math.min(Math.max(Number(args[1]) || 12, 1), 20);
   await runScan(ctx, args[0].replace(/^@/, ''), limit);
 });
@@ -730,41 +693,11 @@ bot.on('message:text', async (ctx) => {
   switch (text) {
     case '🔍 فحص يوزر':
       st.awaiting = 'check';
-      return showMenu(ctx, 'ابعتلي اليوزر(s) اللي عايز تفحصها (الأسماء متعددة بفواصل أو مسافات):');
+      return showMenu(ctx, 'أرسل اليوزرات التي تريد فحصها (أسماء متعددة مفصولة بفواصل أو مسافات):');
     case '🎲 توليد يوزر':
-      return ctx.reply(`اختار نوع التوليد (دلوقتي ${st.genCount} يوزرات):`, {
-        reply_markup: genModeKeyboard(st.genCount),
+      return ctx.reply('اختر نوع التوليد:', {
+        reply_markup: genModeKeyboard(),
       });
-    case '🔬 بحث عميق':
-      st.awaiting = 'deep';
-      return showMenu(
-        ctx,
-        '🔬 <b>بحث عميق</b> — ابعتلي كلمة أساسية تدوّر حواليها (زي <code>gamer</code> أو <code>ahmad</code>),' +
-          '\nأو اكتب <code>random</code> لبحث عشوائي شامل.' +
-          '\nممكن تزود النوع كمان: <code>gamer quad</code> أو <code>random premium</code>'
-      );
-    case '🧩 صيغ بديلة':
-      st.awaiting = 'scan';
-      return showMenu(ctx, 'ابعتلي الاسم الأساسي زي <code>ahmad</code> وهجرب الصيغ اللي حواليه:');
-    case '⏸ إيقاف البحث':
-      setInventoryPaused(true);
-      return showMenu(
-        ctx,
-        '⏸ <b>وقّفت البحث في الخلفية</b> عن يوزرات جديدة.' +
-          '\nالمخزون الجاهز بيشتغل عادي، وأول ما تدوس <b>▶️ تشغيل البحث</b> هيرجع يبني من جديد.'
-      );
-    case '▶️ تشغيل البحث':
-      setInventoryPaused(false);
-      return showMenu(
-        ctx,
-        '▶️ <b>رجّعت البحث</b> في الخلفية — بيبدأ يبني مخزون جديد تاني تلقائيًا.'
-      );
-    case '⚙️ المنصة':
-      return ctx.reply('اختار المنصة اللي عايز تفحص عليها:', {
-        reply_markup: platformKeyboard(ctx.chat.id),
-      });
-    case '❓مساعدة':
-      return showMenu(ctx, HELP);
     default:
       break;
   }
@@ -773,7 +706,7 @@ bot.on('message:text', async (ctx) => {
   if (st.awaiting === 'check') {
     st.awaiting = null;
     const names = parseHandles(text).slice(0, MAX_PER_CHECK);
-    if (!names.length) return showMenu(ctx, 'ابعتلي أسماء صحيحة زي: <code>ahmad, sara_x</code>');
+    if (!names.length) return showMenu(ctx, 'أرسل أسماء صحيحة مثل: <code>ahmad, sara_x</code>');
     return runCheck(ctx, names);
   }
   if (st.awaiting === 'scan') {
@@ -794,14 +727,14 @@ bot.on('message:text', async (ctx) => {
     return runCheck(ctx, [text.replace(/^@/, '')]);
   }
 
-  return showMenu(ctx, 'اضغط أحد الأزرار تحت 👇 أو اكتب /help');
+  return showMenu(ctx, 'اضغط أحد الأزرار أدناه 👇 أو اكتب /help');
 });
 
 bot.catch(async (err) => {
   console.error('bot error:', err.error ?? err);
   // Never leave the user staring at silence after a failed command.
   try {
-    await err.ctx.reply('⚠️ حصل خطأ أثناء تنفيذ الأمر — جرّب تاني بعد شوية.\nلو كرر ابعت /help من الأول.');
+    await err.ctx.reply('⚠️ حدث خطأ أثناء تنفيذ الأمر — جرّب مجددًا بعد قليل.\nإن تكرر أرسل /help من جديد.');
   } catch {
     /* ignore */
   }
@@ -826,7 +759,7 @@ if (!findBrowser()) {
 // Test hook: DISABLE_POLLING=1 lets a local script import this module and
 // drive runGen/runScan/runDeep directly - without ever touching Telegram.
 // Never set it on the server: the deployed bot must always poll.
-export { runGen, runScan, runDeep, runCheck };
+export { runGen, runScan, runDeep, runCheck, mainKeyboard, genModeKeyboard };
 
 // Fill the inventory right away so the first "generate" tap of the day is
 // answered from a warm buffer instead of making the user wait for a search.
